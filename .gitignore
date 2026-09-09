@@ -1,0 +1,6 @@
+build/
+results/
+plots/
+*.o
+*.so
+__pycache__/
