@@ -13,7 +13,9 @@ Each figure plots the implementation throughput
         GB/s = length_bytes / time_ns
 
 against the tested size.  If the tested sizes cover the L1 cache size on
-the target (default 64 KiB) a vertical dashed line is drawn at that spot.
+the target a vertical dashed line is drawn at that spot (default: the L1
+data-cache size auto-detected from sysfs; when it cannot be determined the
+line is omitted unless --cache-size is given).
 
 Requires: matplotlib.  Python >= 3.6.
 
@@ -69,6 +71,32 @@ def safe_name(s):
         h = hashlib.sha1(s.encode("utf-8")).hexdigest()[:8]
         s = s[:68] + "_" + h
     return s or "figure"
+
+
+def detect_l1d():
+    """Read the L1 data-cache size from sysfs (Linux), in bytes.
+
+    Returns None when it cannot be determined.
+    """
+    import glob
+    for idx in sorted(glob.glob("/sys/devices/system/cpu/cpu0/cache/index*")):
+        try:
+            with open(os.path.join(idx, "level")) as f:
+                if f.read().strip() != "1":
+                    continue
+            with open(os.path.join(idx, "type")) as f:
+                if f.read().strip() != "Data":
+                    continue
+            with open(os.path.join(idx, "size")) as f:
+                size = f.read().strip().upper()     # e.g. "48K", "64K", "1M"
+        except OSError:
+            continue
+        m = re.match(r"^(\d+)\s*([KM]?)$", size)
+        if not m:
+            return None
+        mult = {"": 1, "K": 1024, "M": 1024 * 1024}[m.group(2)]
+        return int(m.group(1)) * mult
+    return None
 
 
 def load(input_file):
@@ -220,10 +248,11 @@ def main(argv=None):
     ap.add_argument("--match", action="append", default=[],
                     help="only geometries whose attr string contains this "
                          "substring, e.g. 'align1=0' (repeatable)")
-    ap.add_argument("--cache-size", type=int, default=64 * 1024,
+    ap.add_argument("--cache-size", type=int, default=None,
                     help="L1 cache size in bytes; draw a vertical line if "
-                         "the size range covers it (0 disables) "
-                         "(default: 65536)")
+                         "the size range covers it (0 disables; default: "
+                         "auto-detect from sysfs; line is omitted when the "
+                         "cache size cannot be determined)")
     ap.add_argument("--xlog", action="store_true",
                     help="logarithmic x axis (default: auto when the size "
                          "range spans more than a decade)")
@@ -253,6 +282,8 @@ def main(argv=None):
             sys.stderr.write("warning: functions not present in input: %s\n"
                              % ", ".join(missing))
 
+    if args.cache_size is None:
+        args.cache_size = detect_l1d() or 0   # 0 = no marker (no fallback)
     os.makedirs(args.outdir, exist_ok=True)
     cache_label = human_size(args.cache_size)
 

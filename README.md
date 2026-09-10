@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![License: LGPL v2.1](https://img.shields.io/badge/License-LGPL%20v2.1-blue.svg)](https://www.gnu.org/licenses/lgpl-2.1)
-[![Platform](https://img.shields.io/badge/platform-aarch64--linux-lightgrey)](https://github.com/ikkenei/memlib-bench)
+[![Arch](https://img.shields.io/badge/arch-aarch64%20%7C%20x86--64-lightgrey)](https://github.com/ikkenei/memlib-bench)
 
 **Standalone microbenchmarks for `memcpy`, `memmove`, `memset` and `memcmp`** — built
 on the glibc benchtests methodology (`benchtests/bench-mem*.c`) — with a small CLI to
@@ -47,10 +47,19 @@ they are standalone.
 
 ## Platform
 
-Primary target: **aarch64**. Timing uses the system counter `CNTVCT_EL0`/`CNTFRQ_EL0`
-(as glibc's `sysdeps/aarch64/hp-timing.h`), so measurements are insensitive to CPU
-frequency scaling. On other architectures a `clock_gettime(CLOCK_MONOTONIC)` fallback
-(vDSO) is used. All values are reported in nanoseconds per operation.
+Supported natively (Linux + glibc):
+
+- **aarch64** — the primary target. Timing uses the system counter
+  `CNTVCT_EL0`/`CNTFRQ_EL0` (as glibc's `sysdeps/aarch64/hp-timing.h`), which is immune
+  to CPU frequency scaling. ASM example: `example_neon.S`.
+- **x86-64** — fully supported. Timing uses the invariant TSC (`LFENCE;RDTSC`), like
+  glibc's `sysdeps/x86/hp-timing.h`: the TSC frequency is calibrated once at startup
+  against `clock_gettime(CLOCK_MONOTONIC)`, and the harness transparently falls back to
+  `clock_gettime` when the CPU has no invariant TSC. ASM example: `example_sse2.S`.
+
+On any other architecture a `clock_gettime(CLOCK_MONOTONIC)` fallback (vDSO) is used.
+All values are reported in nanoseconds per operation. The active timing backend can be
+inspected with `MB_TIMING_DEBUG=1`.
 
 ## Layout
 
@@ -131,8 +140,9 @@ Rules:
   driver itself.
 - Assembly `.S` files are built only when the toolchain targets aarch64.
 - Per-file compile flags: `make CFLAGS_myimpl="-march=armv8.2-a+sve"` (variable named
-  after the file base name). Ready-made examples: `example_c.c` (portable C) and
-  `example_neon.S` (aarch64 NEON) in `impls/`.
+  after the file base name). Ready-made examples: `example_c.c` (portable C), `example_neon.S` (aarch64
+  NEON) and `example_sse2.S` (x86-64 SSE2) in `impls/`. The `.S` examples build only
+  when the toolchain targets their architecture.
 
 ## Baselines
 
@@ -244,8 +254,10 @@ python3 tools/plot_mem.py res.json --func memcpy --match 'align1=0' \
 - Multiple implementations on one figure, one colored curve each, shared legend.
 - One figure per geometry: `(align1, align2[, direction])` for the copy functions and
   `memcmp`; `(alignment, fill byte)` for `memset`.
-- A vertical dashed line marks the L1 cache size (default 64 KiB, `--cache-size N`,
-  `0` disables) when the size range covers it.
+- A vertical dashed line marks the L1 data-cache size when the size range covers it:
+  the default is auto-detected from sysfs (no platform-specific fallback: when it
+  cannot be determined the line is omitted), `--cache-size N` sets it explicitly,
+  `--cache-size 0` disables the line.
 - The x axis becomes logarithmic automatically when the range spans more than a decade
   (`--xlog`/`--xlinear` force it).
 - Options: `--func`, `--match`, `--cache-size`, `--fmt png|pdf|svg`, `--dpi`,

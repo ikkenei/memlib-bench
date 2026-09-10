@@ -7,9 +7,11 @@
 #   make impls           build user implementations in impls/ into .so files
 #   make clean
 #
-# Cross compilation to aarch64 (the usual target):
-#   make CROSS=aarch64-linux-gnu-            # everything for aarch64
+# Supported targets: x86-64 Linux and aarch64 Linux.  A plain `make` builds
+# natively on both; CROSS is only needed to build for a different machine:
+#   make CROSS=aarch64-linux-gnu-            # aarch64 from x86 host
 #   make CROSS=aarch64-linux-gnu- MB_ARCH=-march=armv8-a
+#   make MB_ARCH=-march=native               # native build, tune for this CPU
 #
 # Per-implementation compile flags (e.g. for SVE):
 #   make impls CFLAGS_myimpl=-O3 -march=armv8.2-a+sve    (see below)
@@ -44,12 +46,17 @@ COMMON_OBJS := $(COMMON_SRCS:src/%.c=$(OBJDIR)/%.o)
 # exporting the standard symbols memcpy/memmove/memset/memcmp (subset ok).
 IMPL_CS    := $(wildcard impls/*.c)
 
-# Assembly implementations only build when the target is aarch64.
+# Assembly implementations: the bundled examples are arch-specific and
+# build only when the toolchain targets that architecture.  Any other .S
+# file in impls/ is always built (it is the user's responsibility to match
+# the target).
 TARGET_MACH := $(shell $(CC) -dumpmachine 2>/dev/null)
-ifeq ($(findstring aarch64,$(TARGET_MACH)),aarch64)
-IMPL_ASMS  := $(wildcard impls/*.S)
-else
-IMPL_ASMS  :=
+IMPL_ASMS   := $(wildcard impls/*.S)
+ifneq ($(findstring aarch64,$(TARGET_MACH)),aarch64)
+IMPL_ASMS := $(filter-out impls/example_neon.S,$(IMPL_ASMS))
+endif
+ifneq ($(findstring x86_64,$(TARGET_MACH)),x86_64)
+IMPL_ASMS := $(filter-out impls/example_sse2.S,$(IMPL_ASMS))
 endif
 
 IMPL_SOS   := $(patsubst impls/%.c,$(IMPLDIR)/%.so,$(IMPL_CS)) \

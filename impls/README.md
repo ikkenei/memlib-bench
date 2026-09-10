@@ -5,4 +5,6 @@ Put your own `memcpy` / `memmove` / `memset` / `memcmp` implementations here as
 `mb check`) builds each file into `build/impls/<name>.so`.
 
 Examples in this directory: `example_c.c` (portable C), `example_neon.S`
-(aarch64 NEON). See the main README ("Your implementations") for details.
+(aarch64 NEON), `example_sse2.S` (x86-64 SSE2). The assembly examples are built
+only when the toolchain targets their architecture. See the main README
+("Your implementations") for details.
