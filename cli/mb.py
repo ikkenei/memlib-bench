@@ -12,7 +12,8 @@ Commands
   mb list
   mb run   [OPTIONS] FUNC...
   mb check [OPTIONS] FUNC...
-  mb plot  RESULT.json [PLOT_OPTIONS]
+  mb plot        RESULT.json [OPTIONS]   # GB/s vs size (tools/plot_mem.py)
+  mb plot-glibc  RESULT.json [OPTIONS]   # glibc plot_strings.py (timings)
 
 FUNC is one of: memcpy memmove memset memcmp  (or "all").
 """
@@ -458,36 +459,38 @@ def do_build(args):
     return r.returncode
 
 
+def run_tool(tool, argv, modules):
+    """Run a vendored/auxiliary python tool with argument pass-through."""
+    for m in modules:
+        if not have_module(m):
+            die("this command needs the python module '%s' "
+                "(pip install %s)" % (m, " ".join(modules)))
+    path = os.path.join(TOOLS, tool)
+    if not os.path.exists(path):
+        die("tool not found: %s" % path)
+    return subprocess.call([sys.executable, path] + list(argv))
+
+
 def do_plot(args):
-    if not have_module("matplotlib") or not have_module("jsonschema"):
-        die("plotting needs the python modules 'matplotlib' and "
-            "'jsonschema' (pip install matplotlib jsonschema)")
-    if not os.path.exists(args.jsonfile):
-        die("no such file: %s" % args.jsonfile)
-    cmd = [sys.executable, os.path.join(TOOLS, "plot_strings.py"),
-           args.jsonfile, "-s", SCHEMA]
-    outdir = args.outdir or os.path.join(ROOT, "plots")
-    os.makedirs(outdir, exist_ok=True)
-    cmd += ["-o", outdir]
-    if args.plot:
-        cmd += ["-p", args.plot]
-    if args.logarithmic:
-        cmd += ["-l", "log"]
-    if args.values:
-        cmd += ["-v"]
-    if args.extension:
-        cmd += ["-e", args.extension]
-    if args.key:
-        cmd += ["-k", args.key]
-    if args.ifuncs:
-        cmd += ["-i"] + args.ifuncs
-    r = subprocess.run(cmd)
-    return r.returncode
+    """GB/s vs size graphs: tools/plot_mem.py (see `mb plot --help`)."""
+    argv = list(args.args) or ["--help"]
+    return run_tool("plot_mem.py", argv, ["matplotlib"])
 
 
-# ----------------------------------------------------------------------
-# arg parsing
-# ----------------------------------------------------------------------
+def do_plot_glibc(args):
+    """glibc-style timing plots: tools/plot_strings.py."""
+    argv = list(args.args) or ["--help"]
+    # plot_strings.py does not create its output directory, so do it here.
+    try:
+        for i, a in enumerate(argv):
+            if a in ("-o", "--outdir") and i + 1 < len(argv):
+                os.makedirs(argv[i + 1], exist_ok=True)
+            elif a.startswith("--outdir="):
+                os.makedirs(a.split("=", 1)[1], exist_ok=True)
+    except OSError:
+        pass
+    return run_tool("plot_strings.py", argv, ["matplotlib", "jsonschema"])
+
 
 def common_driver_options(p):
     p.add_argument("--impl", action="append", default=[],
@@ -556,29 +559,37 @@ def build_parser():
                    help="functions to check (default: all)")
     c.set_defaults(handler=do_check)
 
-    p = sub.add_parser("plot", help="plot a result JSON file (matplotlib)")
-    p.add_argument("jsonfile", help="result file from `mb run`")
-    p.add_argument("-o", "--outdir", default=None)
-    p.add_argument("-p", "--plot", default="time",
-                   choices=["time", "rel", "max", "thru"])
-    p.add_argument("-l", "--logarithmic", action="store_true")
-    p.add_argument("-v", "--values", action="store_true")
-    p.add_argument("-e", "--extension", default="png",
-                   choices=["png", "pdf", "svg"])
-    p.add_argument("-k", "--key", default="length")
-    p.add_argument("-i", "--ifuncs", nargs="+", default=None)
+    p = sub.add_parser("plot", add_help=False,
+                       help="GB/s vs size graphs (tools/plot_mem.py); "
+                            "run `mb plot --help` for its options")
+    p.add_argument("args", nargs=argparse.REMAINDER,
+                   help="arguments forwarded to tools/plot_mem.py, e.g. "
+                        "RESULT.json -o plots --param src --match 'dst=0'")
     p.set_defaults(handler=do_plot)
+
+    g = sub.add_parser("plot-glibc", add_help=False,
+                       help="glibc-style timing plots (vendored "
+                            "plot_strings.py); `mb plot-glibc --help`")
+    g.add_argument("args", nargs=argparse.REMAINDER,
+                   help="arguments forwarded to tools/plot_strings.py")
+    g.set_defaults(handler=do_plot_glibc)
 
     return ap
 
 
 def main(argv=None):
     # Convenience: `mb memcpy --impl x` and `mb --impl x` mean `mb run ...`.
-    # (Subcommands: build, list, run, check, plot)
+    # (Subcommands: build, list, run, check, plot, plot-glibc)
     argv = list(sys.argv[1:] if argv is None else argv)
-    subcmds = ("build", "list", "run", "check", "plot")
-    if argv and argv[0] not in subcmds:
+    subcmds = ("build", "list", "run", "check", "plot", "plot-glibc")
+    if argv and argv[0] not in subcmds and argv[0] not in ("-h", "--help"):
         argv.insert(0, "run")
+    # plot commands forward their arguments verbatim (argparse REMAINDER
+    # cannot capture "--help", so handle them before parsing).
+    if argv and argv[0] == "plot":
+        return do_plot(argparse.Namespace(args=argv[1:]))
+    if argv and argv[0] == "plot-glibc":
+        return do_plot_glibc(argparse.Namespace(args=argv[1:]))
     args = build_parser().parse_args(argv)
     if not getattr(args, "handler", None):
         build_parser().print_help()

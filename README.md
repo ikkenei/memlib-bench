@@ -112,8 +112,9 @@ median-per-length table plus a geo-mean row. Raw JSON is also saved:
 ./mb run memcmp --impl example_c -o res.json
 ./mb run --table full --gmean -b libc memcpy --impl example_c   # detailed glibc-style table
 
-# throughput graphs (GB/s), own script tools/plot_mem.py
-python3 tools/plot_mem.py results/latest.json -o plots
+# throughput graphs (GB/s): one figure per matrix parameter value
+./mb plot results/latest.json -o plots
+# (the script can also be called directly: python3 tools/plot_mem.py ...)
 ```
 
 `mb run` without function names runs all four functions. `mb memcpy --impl x` is
@@ -241,19 +242,25 @@ differing buffers (including a difference in the last byte). All registered
 implementations are checked (by default libc plus whatever `--impl` you pass), which
 additionally validates the oracle itself.
 
-## Throughput graphs (`tools/plot_mem.py`)
+## Throughput graphs (`mb plot`, `tools/plot_mem.py`)
 
 Reads a benchout JSON file and plots **GB/s = bytes/ns** vs size. By default every
 matrix parameter gets its own family of figures, and inside a figure the curves are
 the implementations:
 
 ```sh
-python3 tools/plot_mem.py results/latest.json -o plots          # all functions
-python3 tools/plot_mem.py res.json --func memcpy --func memset  # subset
-python3 tools/plot_mem.py res.json --param src --param fill     # only these params
-python3 tools/plot_mem.py res.json --match 'src=0'              # one parameter value
-python3 tools/plot_mem.py res.json --mode geometry              # old layout
+./mb plot results/latest.json -o plots                  # all functions
+./mb plot res.json --func memcpy --func memset           # subset
+./mb plot res.json --param src --param fill              # only these params
+./mb plot res.json --match 'src=0'                       # one parameter value
+./mb plot res.json --mode geometry                       # old per-geometry layout
+./mb plot --help                                         # all options
 ```
+
+`mb plot` forwards its arguments to `tools/plot_mem.py`, so the script can also be
+invoked directly (`python3 tools/plot_mem.py ...`). The glibc-style timing plots
+(absolute timings, relative/max/throughput variants, graphs by variant) remain
+available as `mb plot-glibc` (`tools/plot_strings.py`).
 
 - **Parameters become figures**: `src` (`align1`) and `dst` (`align2`) for the copy
   functions and `memcmp`, `align` (`alignment`) and `fill` (`char`) for `memset`,
@@ -337,8 +344,8 @@ original.
 - Nothing beyond a C compiler and Python 3.6+ is needed for `make`, `mb run`
   (summary tables), `mb check`, `mb list`.
 - Detailed glibc tables (`--table full`): the Python module `jsonschema`.
-- Graphs (`tools/plot_mem.py`, or `mb plot` / glibc `plot_strings.py`): `matplotlib`
-  (+`jsonschema`, `numpy` for the glibc script).
+- Graphs (`mb plot` → `tools/plot_mem.py`, `mb plot-glibc` → `tools/plot_strings.py`):
+  `matplotlib` (+`jsonschema`, `numpy` for the glibc script).
 
 ## Notes
 
