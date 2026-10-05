@@ -201,10 +201,18 @@ both  = 1
 
 Syntax and semantics:
 
-- Values are separated by spaces or commas; lists can continue on the next lines;
+- `key = value` is required (the `=` sign is not optional); sections are `[name]`,
+  values are separated by spaces or commas and lists can continue on the next lines;
   comments start with `#` or `;`.
 - List elements: plain numbers (hex allowed, `0x..`), powers of two `A..B`, or a
   linear range `A..B:STEP`. Negative numbers are allowed only for `fill`/`diff`.
+- A key may be repeated, and every occurrence appends to the same list, so values
+  and ranges of any kind can be freely combined:
+  ```
+  sizes = 1..16384           # powers of two: 1, 2, 4, ... 16384
+  sizes = 24576..98304:8192  # linear: 24576, 32768, ... 98304
+  sizes = 131072             # single value
+  ```
 - Keys per function:
   - `memcpy`, `memcmp`: `sizes`, `src`, `dst`, `both`;
   - `memmove`: same keys — all offsets live in one buffer, so pairs overlap; when the

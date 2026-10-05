@@ -195,9 +195,11 @@ add_range_or_value (enum key_kind k, list_t *l, const char *tok,
 
   const char *after = dd + 2;
   long long step = 0;		/* 0 => powers of two		*/
+  long long stop;
   const char *colon = strchr (after, ':');
   if (colon != NULL)
     {
+      /* A..B:STEP - stop is before the colon, step after it.  */
       char sbuf[32];
       size_t n = (size_t) (colon - after);
       if (n == 0 || n >= sizeof sbuf)
@@ -209,22 +211,40 @@ add_range_or_value (enum key_kind k, list_t *l, const char *tok,
       memcpy (sbuf, after, n);
       sbuf[n] = '\0';
       char *pe = NULL;
-      long long s = strtoll (sbuf, &pe, 0);
-      if (pe == sbuf || s <= 0)
+      stop = strtoll (sbuf, &pe, 0);
+      if (pe == sbuf || *pe != '\0')
 	{
 	  snprintf (merr, sizeof merr,
-		    "matrix: line %d: bad step in range '%s'", line_no, tok);
+		    "matrix: line %d: bad range end in '%s'", line_no, tok);
 	  return -1;
 	}
-      step = s;
-      after = colon + 1;
+      char *pe2 = NULL;
+      long long st = strtoll (colon + 1, &pe2, 0);
+      if (pe2 == colon + 1 || *pe2 != '\0' || st <= 0)
+	{
+	  snprintf (merr, sizeof merr,
+		    "matrix: line %d: bad step in range '%s' "
+		    "(write A..B:STEP)", line_no, tok);
+	  return -1;
+	}
+      step = st;
+    }
+  else
+    {
+      char *pe = NULL;
+      stop = strtoll (after, &pe, 0);
+      if (pe == after || *pe != '\0')
+	{
+	  snprintf (merr, sizeof merr,
+		    "matrix: line %d: bad range end in '%s'", line_no, tok);
+	  return -1;
+	}
     }
 
-  long long stop = strtoll (after, &end, 0);
-  if (end == after || *end != '\0' || stop < start)
+  if (stop < start)
     {
-      snprintf (merr, sizeof merr, "matrix: line %d: bad range end '%s'",
-		line_no, tok);
+      snprintf (merr, sizeof merr,
+		"matrix: line %d: range end < start in '%s'", line_no, tok);
       return -1;
     }
 
@@ -369,7 +389,25 @@ mb_matrix_load (const char *path, const char *section, mb_matrix_t *m)
       else
 	{
 	  /* Continuation line: append to the value list of the previous
-	     key (allows long lists to be wrapped over several lines).  */
+	     key (allows long lists to be wrapped over several lines).  A
+	     line that starts with a known key name usually means the '='
+	     was forgotten, which is worth its own message.  */
+	  char first[64];
+	  size_t fn = 0;
+	  while (p[fn] != '\0' && p[fn] != ' ' && p[fn] != '\t'
+		 && p[fn] != ',' && fn < sizeof first - 1)
+	    {
+	      first[fn] = p[fn];
+	      fn++;
+	    }
+	  first[fn] = '\0';
+	  if (key_kind_of (first) != K_UNKNOWN)
+	    {
+	      snprintf (merr, sizeof merr,
+			"matrix: line %d: missing '=' after '%s' "
+			"(write '%s = ...')", line_no, first, first);
+	      goto out;
+	    }
 	  k = curk;
 	  dst_list = curl;
 	  if (k == K_UNKNOWN || dst_list == NULL)
