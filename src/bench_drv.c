@@ -59,45 +59,40 @@ parse_double (const char *opt, const char *v)
   return r;
 }
 
-/* Split "PATH[=LABEL]" into path and label.  Returns static pointers to
-   copies (caller need not free).  */
+/* Split "PATH[=LABEL]" into caller-provided path/label buffers.  Each
+   --impl keeps its own storage, so repeating the option works.  */
 static void
-parse_impl_spec (const char *spec, const char **path, const char **label)
+parse_impl_spec (const char *spec, char *pbuf, size_t psize,
+		 char *lbuf, size_t lsize)
 {
-  static char pbuf[1024];
-  static char lbuf[128];
   const char *eq = strrchr (spec, '=');
   size_t plen = eq != NULL ? (size_t) (eq - spec) : strlen (spec);
 
-  if (plen == 0 || plen >= sizeof pbuf)
+  if (plen == 0 || plen >= psize)
     {
       fprintf (stderr, "invalid --impl specification: %s\n", spec);
       exit (2);
     }
   memcpy (pbuf, spec, plen);
   pbuf[plen] = '\0';
-  *path = pbuf;
 
   if (eq != NULL && eq[1] != '\0')
     {
-      snprintf (lbuf, sizeof lbuf, "%s", eq + 1);
-      *label = lbuf;
+      snprintf (lbuf, lsize, "%s", eq + 1);
+      return;
     }
-  else
-    {
-      /* Default label: basename without extension.  */
-      const char *b = strrchr (pbuf, '/');
-      b = (b == NULL) ? pbuf : b + 1;
-      size_t blen = strlen (b);
-      if (blen >= sizeof lbuf)
-	blen = sizeof lbuf - 1;
-      memcpy (lbuf, b, blen);
-      lbuf[blen] = '\0';
-      char *dot = strrchr (lbuf, '.');
-      if (dot != NULL)
-	*dot = '\0';
-      *label = lbuf;
-    }
+
+  /* Default label: basename without extension.  */
+  const char *b = strrchr (pbuf, '/');
+  b = (b == NULL) ? pbuf : b + 1;
+  size_t blen = strlen (b);
+  if (blen >= lsize)
+    blen = lsize - 1;
+  memcpy (lbuf, b, blen);
+  lbuf[blen] = '\0';
+  char *dot = strrchr (lbuf, '.');
+  if (dot != NULL)
+    *dot = '\0';
 }
 
 int
@@ -168,8 +163,10 @@ mb_opts_parse (mb_opts_t *o, int argc, char **argv, const char *func_symbol,
 		  fprintf (stderr, "too many --impl options (max 32)\n");
 		  exit (2);
 		}
-	      parse_impl_spec (spec, &o->impl_paths[o->impl_count],
-			       &o->impl_labels[o->impl_count]);
+	      parse_impl_spec (spec, o->impl_paths[o->impl_count],
+			       sizeof o->impl_paths[0],
+			       o->impl_labels[o->impl_count],
+			       sizeof o->impl_labels[0]);
 	      o->impl_count++;
 	    }
 	  else

@@ -47,8 +47,8 @@ typedef struct
   size_t max_len;		/* 0 => matrix default		*/
   unsigned long seed;		/* pattern seed		*/
   const char *matrix;		/* matrix profile file		*/
-  const char *impl_paths[32];	/* custom impl shared objects	*/
-  const char *impl_labels[32];
+  char impl_paths[32][1024];	/* custom impl shared objects	*/
+  char impl_labels[32][128];
   int impl_count;
 } mb_opts_t;
 

@@ -42,8 +42,9 @@ they are standalone.
   analyzed with the original glibc tooling (`tools/compare_strings.py`).
 - Configurable test matrix: sizes and offsets can live in a plain-text **profile
   file** (`--matrix`), no recompilation needed.
-- `tools/plot_mem.py`: GB/s vs size plots, one figure per alignment geometry, all
-  implementations overlaid, L1-cache marker line.
+- `tools/plot_mem.py`: GB/s vs size plots, one figure per matrix parameter value
+  (`src`, `dst`, `align`, `fill`, `result`, `dir`), all implementations overlaid as
+  curves, adaptive B/KB/MB size labels, L1-cache marker line.
 
 ## Platform
 
@@ -242,26 +243,40 @@ additionally validates the oracle itself.
 
 ## Throughput graphs (`tools/plot_mem.py`)
 
-Reads a benchout JSON file and plots **GB/s = bytes/ns** vs size:
+Reads a benchout JSON file and plots **GB/s = bytes/ns** vs size. By default every
+matrix parameter gets its own family of figures, and inside a figure the curves are
+the implementations:
 
 ```sh
-python3 tools/plot_mem.py results/latest.json -o plots            # all functions
-python3 tools/plot_mem.py res.json --func memcpy --func memset
-python3 tools/plot_mem.py res.json --func memcpy --match 'align1=0' \
-        --cache-size 65536 -o plots/memcpy-a0
+python3 tools/plot_mem.py results/latest.json -o plots          # all functions
+python3 tools/plot_mem.py res.json --func memcpy --func memset  # subset
+python3 tools/plot_mem.py res.json --param src --param fill     # only these params
+python3 tools/plot_mem.py res.json --match 'src=0'              # one parameter value
+python3 tools/plot_mem.py res.json --mode geometry              # old layout
 ```
 
-- Multiple implementations on one figure, one colored curve each, shared legend.
-- One figure per geometry: `(align1, align2[, direction])` for the copy functions and
-  `memcmp`; `(alignment, fill byte)` for `memset`.
+- **Parameters become figures**: `src` (`align1`) and `dst` (`align2`) for the copy
+  functions and `memcmp`, `align` (`alignment`) and `fill` (`char`) for `memset`,
+  `result` for `memcmp`, `dir` (`dst > src`) for `memcpy`. One figure per parameter
+  *value* — e.g. `memcpy_src_0.png`, `memset_fill_255.png`, `memcmp_result_-1.png`,
+  `memcpy_dir_1.png`.
+- **Implementations are curves**: all registered implementations are drawn on every
+  figure with distinct colors and a shared legend. The remaining parameters are
+  reduced with a median, which is stated in the figure title
+  (`memcpy — src=0   (median over: dst, dir)`).
+- **Size labels** on the x axis are rendered as `B`, `KB` or `MB` depending on
+  magnitude; the axis switches to a base-2 logarithmic scale automatically when the
+  range spans more than a decade (`--xlog`/`--xlinear` force it).
 - A vertical dashed line marks the L1 data-cache size when the size range covers it:
-  the default is auto-detected from sysfs (no platform-specific fallback: when it
+  the default is auto-detected from sysfs (no platform-specific fallback — when it
   cannot be determined the line is omitted), `--cache-size N` sets it explicitly,
   `--cache-size 0` disables the line.
-- The x axis becomes logarithmic automatically when the range spans more than a decade
-  (`--xlog`/`--xlinear` force it).
-- Options: `--func`, `--match`, `--cache-size`, `--fmt png|pdf|svg`, `--dpi`,
-  `--xlog`/`--xlinear`, `--max-figs N`. Only requires `matplotlib`; Python >= 3.6.
+- `--mode geometry` restores the previous layout: one figure per full alignment
+  combination (e.g. `memcpy_align1_0_align2_3_dst_src_1.png`) with substring
+  `--match` on the attribute string.
+- Options: `--func`, `--param`, `--match`, `--mode`, `--cache-size`,
+  `--fmt png|pdf|svg`, `--dpi`, `--xlog`/`--xlinear`, `--max-figs N`.
+  Only requires `matplotlib`; Python >= 3.6.
 
 ## Methodology (glibc benchtests)
 
