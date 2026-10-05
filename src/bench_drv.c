@@ -20,6 +20,7 @@ mb_opts_defaults (mb_opts_t *o)
   o->min_iters = MB_DEF_MIN_ITERS;
   o->max_iters = MB_DEF_MAX_ITERS;
   o->seed = 0x1234abcd;
+  o->repeat = 1;
 }
 
 static const char *
@@ -155,6 +156,9 @@ mb_opts_parse (mb_opts_t *o, int argc, char **argv, const char *func_symbol,
 							    "--seed", v));
 	  else if (strcmp (key, "matrix") == 0)
 	    o->matrix = next_arg (argc, argv, &i, "--matrix", v);
+	  else if (strcmp (key, "repeat") == 0)
+	    o->repeat = parse_long ("--repeat",
+	  			    next_arg (argc, argv, &i, "--repeat", v));
 	  else if (strcmp (key, "impl") == 0)
 	    {
 	      const char *spec = next_arg (argc, argv, &i, "--impl", v);
@@ -183,6 +187,11 @@ mb_opts_parse (mb_opts_t *o, int argc, char **argv, const char *func_symbol,
 	  exit (2);
 	}
     }
+
+  if (o->repeat < 1)
+    o->repeat = 1;
+  if (o->repeat > 10000)
+    o->repeat = 10000;
 
   if (o->quick)
     {
@@ -231,6 +240,8 @@ mb_opts_usage (const char *argv0, const char *func_symbol,
     "      --max-len N            cap tested lengths at N bytes\n"
     "      --matrix FILE          use a matrix profile file (sizes and\n"
     "                             offsets) instead of the built-in matrix\n"
+    "      --repeat N             measure every test N times; each run is\n"
+    "                             emitted separately (default 1)\n"
     "      --seed N               pattern seed for --check\n"
     "%s",
     argv0, func_symbol, func_symbol, MB_DEF_BUDGET_MIB,
@@ -302,4 +313,13 @@ mb_pick_iters (const mb_opts_t *o, size_t bytes)
   if (want > (double) o->max_iters)
     return o->max_iters;
   return (size_t) want;
+}
+
+size_t
+mb_warmup_iters (size_t iters)
+{
+  size_t warm = iters / 64;
+  if (warm < 8)
+    warm = iters / 8;
+  return warm < 1 ? 1 : warm;
 }

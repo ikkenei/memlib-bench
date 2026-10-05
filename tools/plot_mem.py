@@ -64,8 +64,10 @@ PALETTE = [
     "#393b79", "#843c39", "#637939", "#7b4173", "#5254a3",
 ]
 
-# The x axis (size) and the measurement array are not "parameters".
+# The x axis (size), the measurement array and the repetition index are
+# not "parameters" (repetitions of one case are aggregated together).
 XKEY = "length"
+META_KEYS = ("length", "timings", "run")
 
 # Canonical display order of the parameters (friendly names).
 PARAM_ORDER = ["align1", "align2", "alignment", "char", "fill",
@@ -158,7 +160,7 @@ def param_dimensions(rows):
     seen = set()
     for row in rows:
         for k in row:
-            if k in (XKEY, "timings") or k in seen:
+            if k in META_KEYS or k in seen:
                 continue
             seen.add(k)
             dims.append((k, PARAM_NAMES.get(k, k)))
@@ -319,7 +321,7 @@ def job_combo(fname, ifuncs, rows):
     groups = {}
     for row in rows:
         attrs = tuple(sorted(((k, v) for k, v in row.items()
-                              if k not in (XKEY, "timings")),
+                              if k not in META_KEYS),
                              key=lambda kv: param_rank(kv[0])))
         groups.setdefault(attrs, []).append(row)
     jobs = []

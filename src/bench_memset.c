@@ -18,20 +18,24 @@ typedef void *(*proto_t) (void *, int, size_t);
 static const mb_opts_t *g_o;
 
 static void
-do_one_test (json_ctx_t *json_ctx, const mb_impl_t *impl, char *s, int c,
-	     size_t len, size_t iters)
+warm_impl (const mb_impl_t *impl, char *s, int c, size_t len, size_t iters)
 {
   proto_t f = (proto_t) impl->fn;
-  size_t warm = iters / 64;
-  if (warm < 8)
-    warm = iters / 8;
-  if (warm < 1)
-    warm = 1;
+  size_t warm = mb_warmup_iters (iters);
 
   mb_current_impl = impl->name;
   for (size_t i = 0; i < warm; ++i)
     f (s, c, len);
+  mb_current_impl = NULL;
+}
 
+static double
+measure_impl (const mb_impl_t *impl, char *s, int c, size_t len,
+	      size_t iters)
+{
+  proto_t f = (proto_t) impl->fn;
+
+  mb_current_impl = impl->name;
   uint64_t t0 = mb_counter_read ();
   for (size_t i = 0; i < iters; ++i)
     f (s, c, len);
@@ -39,7 +43,7 @@ do_one_test (json_ctx_t *json_ctx, const mb_impl_t *impl, char *s, int c,
   mb_current_impl = NULL;
 
   double ns = (double) mb_counter_diff_ns (t0, t1, mb_counter_freq ());
-  json_element_double (json_ctx, ns / (double) iters);
+  return ns / (double) iters;
 }
 
 static void
@@ -51,20 +55,30 @@ do_test (json_ctx_t *json_ctx, size_t align, int c, size_t len)
   if (align + len > mb_page_size)
     return;
 
+  char *s = (char *) mb_buf1.base + align;
   size_t iters = mb_pick_iters (g_o, len == 0 ? 1 : len);
-
-  json_element_object_begin (json_ctx);
-  json_attr_uint (json_ctx, "length", len);
-  json_attr_uint (json_ctx, "alignment", align);
-  json_attr_int (json_ctx, "char", c);
-  json_array_begin (json_ctx, "timings");
+  size_t reps = g_o->repeat > 0 ? (size_t) g_o->repeat : 1;
 
   for (int k = 0; k < mb_impl_count (); k++)
-    do_one_test (json_ctx, mb_impl_get (k), (char *) mb_buf1.base + align,
-		 c, len, iters);
+    warm_impl (mb_impl_get (k), s, c, len, iters);
 
-  json_array_end (json_ctx);
-  json_element_object_end (json_ctx);
+  for (size_t r = 0; r < reps; r++)
+    {
+      json_element_object_begin (json_ctx);
+      json_attr_uint (json_ctx, "length", len);
+      json_attr_uint (json_ctx, "alignment", align);
+      json_attr_int (json_ctx, "char", c);
+      if (reps > 1)
+	json_attr_uint (json_ctx, "run", r);
+      json_array_begin (json_ctx, "timings");
+
+      for (int k = 0; k < mb_impl_count (); k++)
+	json_element_double (json_ctx,
+			     measure_impl (mb_impl_get (k), s, c, len, iters));
+
+      json_array_end (json_ctx);
+      json_element_object_end (json_ctx);
+    }
 }
 
 static void

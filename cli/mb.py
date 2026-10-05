@@ -191,7 +191,8 @@ def driver_cmd(fn, args, impls, check):
         cmd.append("--check")
     for opt, attr in (("--iters", "iters"), ("--budget", "budget"),
                       ("--max-len", "max_len"), ("--seed", "seed"),
-                      ("--min-iters", "min_iters")):
+                      ("--min-iters", "min_iters"),
+                      ("--repeat", "repeat")):
         v = getattr(args, attr, None)
         if v:
             cmd += [opt, str(v)]
@@ -320,7 +321,240 @@ def pct(v, base):
     return "%+6.2f%%" % d
 
 
-def summary_table(func_data, fn, base, gmean_only):
+# Parameter names shared with tools/plot_mem.py.
+PARAM_DISPLAY = {
+    "align1": "src", "align2": "dst", "alignment": "align",
+    "char": "fill", "fill": "fill", "result": "result",
+    "dst > src": "dir", "dst>src": "dir",
+}
+PARAM_ORDER = ["align1", "align2", "alignment", "char", "fill",
+               "result", "dst > src", "dst>src"]
+SUMMARY_META = ("length", "timings", "run")
+DEFAULT_REGIONS = "16,64,512,4096,65536"
+
+
+def _param_rank(k):
+    try:
+        return (0, PARAM_ORDER.index(k))
+    except ValueError:
+        return (1, k)
+
+
+def _fmt_size(n):
+    if n >= 1024 * 1024 and n % (1024 * 1024) == 0:
+        return "%dM" % (n // (1024 * 1024))
+    if n >= 1024 and n % 1024 == 0:
+        return "%dK" % (n // 1024)
+    return "%d" % n
+
+
+def _combo_of(row):
+    return tuple(sorted(((k, v) for k, v in row.items()
+                         if k not in SUMMARY_META),
+                        key=lambda kv: _param_rank(kv[0])))
+
+
+def _combo_label(combo):
+    return " ".join("%s=%s" % (PARAM_DISPLAY.get(k, k), v)
+                    for k, v in combo)
+
+
+def _combo_sort_key(combo):
+    return tuple((_param_rank(k), str(v)) for k, v in combo)
+
+
+def _region_bounds(spec):
+    try:
+        bounds = sorted({int(x) for x in str(spec).replace(" ", "").split(",")
+                         if x != ""})
+    except ValueError:
+        die("--regions expects comma-separated byte sizes, e.g. %s"
+            % DEFAULT_REGIONS)
+    if not bounds or bounds[0] < 1:
+        die("--regions must contain positive byte sizes")
+    return bounds
+
+
+def _region_of(length, bounds):
+    for i, b in enumerate(bounds):
+        if length <= b:
+            return i
+    return len(bounds)
+
+
+def _region_labels(bounds):
+    labels = []
+    prev = 0
+    for b in bounds:
+        lo = prev + 1
+        labels.append(("\u2264%s" % _fmt_size(b)) if lo <= 1
+                      else ("%s-%s" % (_fmt_size(lo), _fmt_size(b))))
+        prev = b
+    labels.append(">%s" % _fmt_size(bounds[-1]))
+    return labels
+
+
+def _central(vals, stat):
+    v = sorted(vals)
+    if stat == "min":
+        return v[0]
+    if stat == "max":
+        return v[-1]
+    if stat == "mean":
+        return sum(v) / float(len(v))
+    return v[len(v) // 2]
+
+
+def _cov(vals):
+    """Coefficient of variation in percent (needs >= 2 samples)."""
+    if len(vals) < 2:
+        return None
+    m = sum(vals) / float(len(vals))
+    if m <= 0:
+        return None
+    var = sum((x - m) ** 2 for x in vals) / float(len(vals))
+    return (var ** 0.5) / m * 100.0
+
+
+def _collect_samples(func_data):
+    """samples[(combo, length)][impl] = [ns, ...] plus metadata."""
+    ifuncs = func_data.get("ifuncs", [])
+    samples = {}
+    lengths = set()
+    combos = set()
+    runs = 1
+    for row in func_data.get("results", []):
+        if "timings" not in row or "length" not in row:
+            continue
+        try:
+            length = int(row["length"])
+        except (TypeError, ValueError):
+            continue
+        if length <= 0:
+            continue                        # no throughput for size 0
+        combo = _combo_of(row)
+        combos.add(combo)
+        lengths.add(length)
+        bucket = samples.setdefault((combo, length), {})
+        for i, ns in enumerate(row["timings"][:len(ifuncs)]):
+            try:
+                ns = float(ns)
+            except (TypeError, ValueError):
+                continue
+            if ns > 0:
+                bucket.setdefault(i, []).append(ns)
+        try:
+            runs = max(runs, int(row.get("run", 0)) + 1)
+        except (TypeError, ValueError):
+            pass
+    return ifuncs, samples, sorted(lengths), sorted(combos, key=_combo_sort_key), runs
+
+
+def summary_by_combo(func_data, fn, args):
+    """Rows: parameter combinations.  Columns: size regions (GB/s)."""
+    ifuncs, samples, lengths, combos, runs = _collect_samples(func_data)
+    if not ifuncs or not combos:
+        return
+    base = pick_base(ifuncs, getattr(args, "base", None))
+    bounds = _region_bounds(getattr(args, "regions", None) or DEFAULT_REGIONS)
+    labels = _region_labels(bounds)
+    stat = getattr(args, "stats", None) or "median"
+    match = getattr(args, "match", None)
+    b_idx = ifuncs.index(base)
+
+    by_region = {}
+    for length in lengths:
+        by_region.setdefault(_region_of(length, bounds), []).append(length)
+    regions = [r for r in sorted(by_region) if r < len(labels)]
+    if not regions:
+        return
+
+    # cell[(combo, impl, region)] = geo-mean GB/s; noise[...] = median CoV
+    cell = {}
+    noise = {}
+    for combo in combos:
+        for i, impl in enumerate(ifuncs):
+            for r in regions:
+                rates, covs = [], []
+                for length in by_region[r]:
+                    vals = samples.get((combo, length), {}).get(i)
+                    if not vals:
+                        continue
+                    c = _central(vals, stat)
+                    if c > 0:
+                        rates.append(length / c)
+                    cv = _cov(vals)
+                    if cv is not None:
+                        covs.append(cv)
+                if rates:
+                    g = math.exp(sum(math.log(x) for x in rates) / len(rates))
+                    cell[(combo, i, r)] = g
+                if covs:
+                    covs.sort()
+                    noise[(combo, i, r)] = covs[len(covs) // 2]
+
+    header = [" " * 2 + "%-*s" % (max(14, max(len(n) for n in ifuncs) + 2),
+                                  "combinations / GB/s")
+              + "".join("%9s" % labels[r] for r in regions)]
+    print("Function: %s" % fn)
+    print("cells: geo-mean GB/s over the sizes in the region "
+          "(statistic: %s%s; %% vs %s)"
+          % (stat, " of %d runs" % runs if runs > 1 else "", base))
+    print(header[0])
+    shown = 0
+    for combo in combos:
+        label = _combo_label(combo)
+        if match and match.lower() not in label.lower():
+            continue
+        shown += 1
+        print("  %s" % label)
+        for i, impl in enumerate(ifuncs):
+            cells = []
+            for r in regions:
+                v = cell.get((combo, i, r))
+                if v is None:
+                    cells.append("%9s" % ".")
+                elif i == b_idx:
+                    cells.append("%9.2f" % v)
+                else:
+                    b = cell.get((combo, b_idx, r))
+                    if b is None or b <= 0:
+                        cells.append("%9.2f" % v)
+                    else:
+                        cells.append("%8.1f%%" % ((v - b) * 100.0 / b))
+            print("    %-14s %s" % (impl, "".join(cells)))
+    if shown == 0:
+        print("  (no combinations match --match %r)" % match)
+
+    if runs > 1:
+        line = []
+        for i, impl in enumerate(ifuncs):
+            covs = sorted(v for (c, j, r), v in noise.items() if j == i)
+            if covs:
+                line.append("%s: median %.1f%%, max %.1f%%"
+                            % (impl, covs[len(covs) // 2], covs[-1]))
+        if line:
+            print("  repeat noise (CoV over %d runs): %s"
+                  % (runs, "; ".join(line)))
+
+    if getattr(args, "gmean", False):
+        print("  geo-mean over all regions:")
+        for i, impl in enumerate(ifuncs):
+            vals = [v for (c, j, r), v in cell.items() if j == i]
+            if not vals:
+                continue
+            g = math.exp(sum(math.log(x) for x in vals) / len(vals))
+            if i == b_idx:
+                print("    %-14s %8.2f GB/s" % (impl, g))
+            else:
+                bvals = [v for (c, j, r), v in cell.items() if j == b_idx]
+                b = math.exp(sum(math.log(x) for x in bvals) / len(bvals))
+                print("    %-14s %+7.1f%%" % (impl, (g - b) * 100.0 / b))
+    print()
+
+
+def summary_by_size(func_data, fn, base, gmean_only, match=None):
+    """Rows: tested sizes, aggregated over all parameter combinations."""
     ifuncs = func_data.get("ifuncs", [])
     results = func_data.get("results", [])
     if not results:
@@ -328,32 +562,37 @@ def summary_table(func_data, fn, base, gmean_only):
     base = pick_base(ifuncs, base)
     idx = {n: i for i, n in enumerate(ifuncs)}
 
-    # group result rows by their "length" attribute
     by_len = {}
+    runs = 1
     for row in results:
         if "timings" not in row:
             continue
         length = row.get("length", row.get("alignment", 0))
         by_len.setdefault(int(length), []).append(row["timings"])
+        try:
+            runs = max(runs, int(row.get("run", 0)) + 1)
+        except (TypeError, ValueError):
+            pass
 
     print("Function: %s" % fn)
+    print("cells: median ns per call over all combinations "
+          "(%s)" % ("median of %d runs" % runs if runs > 1 else "single run"))
     print("%9s %9s | %s" % ("length", "B/call",
                             " ".join("%14s" % n for n in ifuncs)))
     gsum = [0.0] * len(ifuncs)
     gcnt = 0
-    rows = []
     for length in sorted(by_len):
+        if match and match not in str(length):
+            continue
         samples = by_len[length]
         med = []
         for i in range(len(ifuncs)):
             vals = sorted(s[i] for s in samples if i < len(s) and s[i] > 0)
             med.append(vals[len(vals) // 2] if vals else float("nan"))
-        rows.append((length, med))
         for i, v in enumerate(med):
             if not math.isnan(v) and v > 0:
                 gsum[i] += math.log(v)
         gcnt += 1
-    for length, med in rows:
         cells = []
         for i, v in enumerate(med):
             if math.isnan(v):
@@ -455,10 +694,13 @@ def do_run(args):
             if fn in data.get("functions", {}):
                 if table == "full":
                     full_table(data, [fn], args)
+                elif getattr(args, "summary", "combo") == "size":
+                    summary_by_size(data["functions"][fn], fn,
+                                    getattr(args, "base", None),
+                                    bool(getattr(args, "gmean", False)),
+                                    getattr(args, "match", None))
                 else:
-                    summary_table(data["functions"][fn], fn,
-                                  getattr(args, "base", None),
-                                  bool(getattr(args, "gmean", False)))
+                    summary_by_combo(data["functions"][fn], fn, args)
     return 1 if failed else 0
 
 
@@ -563,6 +805,7 @@ def common_driver_options(p):
                         "automatically when they are out of date")
 
 
+
 def build_parser():
     ap = argparse.ArgumentParser(
         prog="mb",
@@ -596,7 +839,24 @@ def build_parser():
     r.add_argument("-b", "--base", default=None,
                    help="baseline implementation for percentages")
     r.add_argument("--gmean", action="store_true",
-                   help="print the geometric mean summary row")
+                   help="print the geometric mean summary row/block")
+    r.add_argument("--repeat", type=int, default=None,
+                   help="measure every test N times; each run is stored in "
+                        "the JSON with a 'run' attribute and the summary "
+                        "reports repeat noise")
+    r.add_argument("--summary", choices=["combo", "size"], default="combo",
+                   help="summary layout: 'combo' (default) = rows are "
+                        "parameter combinations and columns are size "
+                        "regions; 'size' = one row per tested size")
+    r.add_argument("--regions", default=None,
+                   help="size-region boundaries for --summary combo in bytes "
+                        "(default: %s)" % DEFAULT_REGIONS)
+    r.add_argument("--stats", choices=["median", "min", "max", "mean"],
+                   default="median",
+                   help="statistic over repeated runs (default: median)")
+    r.add_argument("--match", default=None,
+                   help="only summary rows whose combination label "
+                        "contains this substring")
     r.add_argument("--no-table", action="store_true",
                    help="do not print any table")
     r.add_argument("-m", "--matrix", default=None,

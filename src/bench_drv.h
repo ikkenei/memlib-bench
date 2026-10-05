@@ -45,6 +45,7 @@ typedef struct
   size_t min_iters;
   size_t max_iters;
   size_t max_len;		/* 0 => matrix default		*/
+  long repeat;			/* measurements per test (>=1)	*/
   unsigned long seed;		/* pattern seed		*/
   const char *matrix;		/* matrix profile file		*/
   char impl_paths[32][1024];	/* custom impl shared objects	*/
@@ -67,5 +68,8 @@ int mb_register_impls (const mb_opts_t *o, const char *func_symbol,
 
 /* Iterations for a test touching BYTES bytes per call.  */
 size_t mb_pick_iters (const mb_opts_t *o, size_t bytes);
+
+/* Warm-up iterations for a test with ITERS measured iterations. */
+size_t mb_warmup_iters (size_t iters);
 
 #endif /* MB_BENCH_DRV_H */

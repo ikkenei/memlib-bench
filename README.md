@@ -18,6 +18,8 @@ benchmark **your own** implementations of these functions on real hardware.
   implementation is reported by name.
 - Emit **glibc-compatible JSON** (benchout schema) and render comparison tables
   (`mb run`, `--table full`) or **GB/s throughput graphs** (`tools/plot_mem.py`).
+- Repeat every measurement (`--repeat N`) and get statistics (median/min/max/mean,
+  repeat noise) in the summary; each run is kept in the JSON.
 
 The project is self-contained: it needs no glibc build system, and the pieces taken
 from glibc (see [License & provenance](#license--provenance)) were vendored because
@@ -177,8 +179,54 @@ tables defaults to `libc` (then the first implementation); change it with `-b/--
 | `--max-len N` | cap tested lengths; above 64 KiB the "large" cases are added |
 | `--matrix FILE` | run the sizes/offsets from a matrix profile (below) |
 | `--seed N` | pattern seed for `--check` |
+| `--repeat N` | measure every test N times (each run is stored in the JSON) |
+| `--summary combo\|size` | summary layout (default `combo`: combinations × size regions) |
+| `--regions LIST` | size-region boundaries for `--summary combo` (default `16,64,512,4096,65536`) |
+| `--stats median\|min\|max\|mean` | statistic over repeated runs (default `median`) |
+| `--match SUBSTR` | only summary rows whose combination label contains SUBSTR |
+| `--gmean` | add a geo-mean block/row over the whole summary |
 | `--no-warmup` | skip the CPU frequency ramp-up loop |
 | `--no-build` | do not rebuild drivers/implementations automatically |
+
+## Summary table (`mb run`)
+
+By default the summary is broken down **by parameters**, with sizes aggregated into
+**regions**; the cells are throughput:
+
+```
+Function: memcpy
+cells: geo-mean GB/s over the sizes in the region (statistic: median of 3 runs; % vs libc)
+  combinations / GB/s      ≤16    17-64   65-512   513-4K 4097-64K
+  src=0 dst=0 dir=0
+    libc                1.61    27.44    83.86   178.73   105.65
+    example_c         -36.1%   -62.1%   -66.8%   -71.3%   -37.4%
+  src=0 dst=3 dir=0
+    libc                1.74    28.20    71.11    75.20    52.23
+    example_c         -61.2%   -83.3%   -75.5%   -41.8%   -16.9%
+  ...
+  repeat noise (CoV over 3 runs): libc: median 0.7%, max 10.3%; example_c: median 1.4%, max 25.6%
+```
+
+- Rows are the full parameter combinations (`src`/`dst`/`dir` for `memcpy`,
+  `align`/`fill` for `memset`, ...), so different code paths are not averaged
+  together.  `--match dir=1` keeps only the matching rows.
+- Columns are size regions (upper bounds from `--regions`, default 16 B, 64 B, 512 B,
+  4 KiB, 64 KiB); each cell is the geometric mean of `length / time` over the sizes
+  of that region.
+- The base implementation (default `libc`) shows absolute GB/s, the others show the
+  difference in percent.
+- `--summary size` switches to the flat layout: one row per tested size, cells in
+  nanoseconds per call, aggregated over all combinations.
+- `--stats min|max|mean` selects the statistic used for repeated runs (default
+  `median`); `--gmean` adds a geo-mean block over all cells.
+
+### Repeats (`--repeat N`)
+
+`--repeat N` measures every test N times (after the warm-up and with the same
+iteration budget).  Every run is a separate object in the JSON, tagged with
+`"run": k`, so the raw data can be analysed per run; the summary reports the chosen
+statistic plus a repeat-noise line (median and max coefficient of variation), and
+`tools/plot_mem.py` aggregates the runs with a median.
 
 ## Matrix profiles (`--matrix FILE`)
 
@@ -315,7 +363,8 @@ available as `mb plot-glibc` (`tools/plot_strings.py`).
   time) — unlike glibc's fixed `INNER_LOOP_ITERS*`. `--iters` restores fixed counts.
 - Each call's time = (counter delta around the whole loop)/iterations; before measuring
   a warm-up loop lets the CPU reach its steady-state frequency (like glibc's
-  `bench_start`).
+  `bench_start`).  The per-test warm-up (present for all four functions; glibc warms
+  only the copy functions) is run once, before the `--repeat N` measurements.
 - JSON output matches `benchout_strings.schema.json`, so files can be analyzed with the
   glibc tools directly:
   ```sh
