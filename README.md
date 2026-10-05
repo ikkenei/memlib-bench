@@ -120,6 +120,11 @@ median-per-length table plus a geo-mean row. Raw JSON is also saved:
 `mb run` without function names runs all four functions. `mb memcpy --impl x` is
 shorthand for `mb run memcpy --impl x`.
 
+`mb run`/`mb check` rebuild the benchmark drivers (and any `impls/` shared object
+whose source is newer) automatically when they are missing or out of date — so
+after a `git pull` you can run `./mb run ...` directly. Use `--no-build` to disable
+this and fail with an error instead.
+
 ## Your implementations (`impls/`)
 
 Drop a `.c` file (or `.S` for aarch64) into `impls/` that exports the standard
@@ -173,6 +178,7 @@ tables defaults to `libc` (then the first implementation); change it with `-b/--
 | `--matrix FILE` | run the sizes/offsets from a matrix profile (below) |
 | `--seed N` | pattern seed for `--check` |
 | `--no-warmup` | skip the CPU frequency ramp-up loop |
+| `--no-build` | do not rebuild drivers/implementations automatically |
 
 ## Matrix profiles (`--matrix FILE`)
 

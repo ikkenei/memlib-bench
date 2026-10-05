@@ -59,11 +59,40 @@ def err(msg):
     sys.stderr.write("mb: %s\n" % msg)
 
 
-def check_built():
-    missing = [f for f in FUNCS if not os.path.exists(DRIVER[f])]
-    if missing:
-        die("benchmark drivers not built (%s); run `mb build` first"
-            % ", ".join(missing))
+def _make(argv):
+    return subprocess.call(["make", "-C", ROOT] + list(argv))
+
+
+def rel(path):
+    """Path relative to the project root (as the Makefile spells targets)."""
+    return os.path.relpath(path, ROOT)
+
+
+def ensure_drivers(no_build=False):
+    """Make sure the four benchmark drivers exist and are up to date."""
+    targets = [rel(DRIVER[f]) for f in FUNCS]      # Makefile uses rel paths
+    missing = [t for t in targets if not os.path.exists(os.path.join(ROOT, t))]
+    if not missing:
+        if no_build:
+            return
+        # make -q: 0 = up to date, 1 = needs rebuild, 2 = error
+        rc = subprocess.call(["make", "-C", ROOT, "-q"] + targets,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        if rc == 0:
+            return
+        why = "out of date"
+    else:
+        why = "missing"
+    if no_build:
+        die("benchmark drivers are %s; run `mb build` "
+            "(auto-build disabled by --no-build)" % why)
+    err("benchmark drivers %s; rebuilding (make)" % why)
+    if subprocess.call(["make", "-C", ROOT] + targets) != 0:
+        die("failed to build the benchmark drivers")
+    still = [t for t in targets if not os.path.exists(os.path.join(ROOT, t))]
+    if still:
+        die("benchmark drivers still missing: %s" % ", ".join(still))
 
 
 # ----------------------------------------------------------------------
@@ -77,6 +106,23 @@ def source_of(spec):
         if os.path.exists(p):
             return p
     return None
+
+
+def _impl_stale(so_path, spec):
+    """True when the impls/ source is newer than its .so."""
+    stem = None
+    if spec.endswith((".c", ".S")):
+        stem = os.path.basename(spec)[:-2]
+    elif "/" not in spec and not spec.endswith(".so"):
+        stem = spec
+    if stem is None:
+        return False
+    for ext in (".c", ".S"):
+        src = os.path.join(IMPLS_SRC, stem + ext)
+        if os.path.exists(src) and os.path.exists(so_path):
+            if os.path.getmtime(src) > os.path.getmtime(so_path):
+                return True
+    return False
 
 
 def resolve_impls(specs):
@@ -114,19 +160,21 @@ def resolve_impls(specs):
         if path is None:
             src = spec
             path = os.path.join(IMPLDIR, os.path.basename(src)[:-2] + ".so")
-        if not os.path.exists(path):
+        if not os.path.exists(path) or _impl_stale(path, spec):
             src = None
             if "/" not in spec and not spec.endswith(".so"):
                 src = source_of(spec)
+            elif spec.endswith((".c", ".S")):
+                src = spec
             if src is None:
-                die("implementation %r not built (looked for %s); "
-                    "run `mb build` first" % (spec, path))
-            r = subprocess.run(
-                ["make", "-C", ROOT,
-                 os.path.join(IMPLDIR, os.path.basename(src)[:-2] + ".so")],
-                stdout=subprocess.DEVNULL)
-            if r.returncode != 0:
-                die("failed to build %s (see make output)" % src)
+                if not os.path.exists(path):
+                    die("implementation %r not built (looked for %s); "
+                        "run `mb build` first" % (spec, path))
+            else:
+                target = rel(os.path.join(IMPLDIR,
+                                          os.path.basename(src)[:-2] + ".so"))
+                if _make([target]) != 0:
+                    die("failed to build %s (see make output)" % src)
         if not os.path.exists(path):
             die("impl .so still missing after build: %s" % path)
         out.append(path if label is None else "%s=%s" % (path, label))
@@ -360,7 +408,7 @@ def full_table(data, funcs, args):
 
 
 def do_run(args):
-    check_built()
+    ensure_drivers(getattr(args, "no_build", False))
     funcs = parse_funcs(args.funcs)
     impls = resolve_impls(args.impl) if args.impl else []
     label = "-".join(funcs)
@@ -415,7 +463,7 @@ def do_run(args):
 
 
 def do_check(args):
-    check_built()
+    ensure_drivers(getattr(args, "no_build", False))
     funcs = parse_funcs(args.funcs)
     impls = resolve_impls(args.impl) if args.impl else []
     failed = False
@@ -510,6 +558,9 @@ def common_driver_options(p):
     p.add_argument("--seed", type=int, help="pattern seed")
     p.add_argument("--no-warmup", action="store_true", dest="no_warmup",
                    help="skip the frequency ramp-up loop")
+    p.add_argument("--no-build", action="store_true", dest="no_build",
+                   help="do not rebuild drivers/implementations "
+                        "automatically when they are out of date")
 
 
 def build_parser():
