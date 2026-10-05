@@ -13,28 +13,30 @@ from sysfs) a vertical dashed line is drawn at that spot.
 
 Two figure layouts (`--mode`):
 
-  params (default)
-      One figure per *parameter value*.  Every matrix parameter gets its
-      own family of figures: `src`/`align1`, `dst`/`align2` for copy
-      functions and memcmp, `align` and `fill` for memset, `result` for
-      memcmp, `dir` for `dst > src`.  In each figure the curves are the
-      implementations; samples of the remaining parameters are reduced
-      with a median.  Example filenames:
-        memcpy_src_0.png, memcpy_dst_3.png, memcpy_dir_1.png,
-        memset_align_0.png, memset_fill_255.png, memcmp_result_-1.png
+  combo (default)
+      One figure per *full parameter combination*: every combination gets
+      its own figure, because e.g. src=1,dst=1 is a different code path
+      from src=1,dst=2, and the memset align/fill combinations are four
+      different algorithms.  In each figure the curves are the
+      implementations.  Example filenames:
+        memcpy_src_0_dst_3_dir_1.png
+        memmove_src_0_dst_7.png
+        memset_align_0_fill_255.png
+        memcmp_src_0_dst_3_result_-1.png
 
-  geometry
-      One figure per full alignment geometry (previous behaviour):
-        memcpy_align1_0_align2_3_dst_src_1.png
+  param
+      One figure per *parameter value*, medians taken over the remaining
+      parameters - useful to see the sensitivity to one parameter:
+        memcpy_src_0.png, memset_fill_255.png, memcmp_result_-1.png
 
 Requires: matplotlib.  Python >= 3.6.
 
 Usage:
     python3 tools/plot_mem.py results/latest.json -o plots
-    python3 tools/plot_mem.py results/latest.json --mode geometry
-    python3 tools/plot_mem.py results/latest.json --param src --param fill
     python3 tools/plot_mem.py results/latest.json --func memcpy \\
-            --match 'src=0' --cache-size 65536
+            --match 'dst=0' --cache-size 65536
+    python3 tools/plot_mem.py results/latest.json --mode param \\
+            --param src --param fill
 """
 
 import argparse
@@ -64,6 +66,10 @@ PALETTE = [
 
 # The x axis (size) and the measurement array are not "parameters".
 XKEY = "length"
+
+# Canonical display order of the parameters (friendly names).
+PARAM_ORDER = ["align1", "align2", "alignment", "char", "fill",
+               "result", "dst > src", "dst>src"]
 
 # Matrix attribute -> user-facing parameter name.
 PARAM_NAMES = {
@@ -159,16 +165,24 @@ def param_dimensions(rows):
     return dims
 
 
+def param_rank(k):
+    """Sort key giving the canonical parameter order."""
+    try:
+        return (0, PARAM_ORDER.index(k))
+    except ValueError:
+        return (1, k)
+
+
+def display_attr(k):
+    """User-facing parameter name for a raw attribute key."""
+    return PARAM_NAMES.get(k, k)
+
+
 def value_sort_key(v):
     try:
         return (0, float(v), "")
     except (TypeError, ValueError):
         return (1, 0.0, str(v))
-
-
-def attr_str(attrs):
-    """Geometry string from raw (key, value) pairs."""
-    return ", ".join("%s=%s" % (k, v) for k, v in attrs)
 
 
 def curves_for(rows, ifuncs):
@@ -295,22 +309,30 @@ def job_params(fname, ifuncs, rows, params):
     return jobs
 
 
-def job_geometry(fname, ifuncs, rows, params):
-    """One job per full geometry (previous behaviour)."""
+def job_combo(fname, ifuncs, rows):
+    """One job per full parameter combination (default layout).
+
+    Every distinct combination of the non-length attributes gets its own
+    figure: src=1,dst=1 and src=1,dst=2 are different code paths, as are
+    the four align/fill combinations of memset.
+    """
     groups = {}
     for row in rows:
-        attrs = tuple(sorted((k, v) for k, v in row.items()
-                             if k not in (XKEY, "timings")))
+        attrs = tuple(sorted(((k, v) for k, v in row.items()
+                              if k not in (XKEY, "timings")),
+                             key=lambda kv: param_rank(kv[0])))
         groups.setdefault(attrs, []).append(row)
     jobs = []
-    for attrs in sorted(groups):
-        s = attr_str(attrs)
+    for attrs in groups:
+        pretty = ", ".join("%s=%s" % (display_attr(k), v) for k, v in attrs)
+        raw = ", ".join("%s=%s" % (k, v) for k, v in attrs)
+        name = "_".join("%s_%s" % (display_attr(k), v) for k, v in attrs)
         jobs.append({
-            "title": "%s — %s" % (fname, s),
+            "title": "%s — %s" % (fname, pretty),
             "rows": groups[attrs],
             "ifuncs": ifuncs,
-            "out": safe_name("%s_%s" % (fname, s.replace(", ", "_"))),
-            "keys": [s],
+            "out": safe_name("%s_%s" % (fname, name)),
+            "keys": [pretty, raw],
         })
     return jobs
 
@@ -350,11 +372,13 @@ def main(argv=None):
     ap.add_argument("-o", "--outdir", default="plots",
                     help="output directory (created if needed) "
                          "(default: plots)")
-    ap.add_argument("--mode", choices=["params", "geometry"],
-                    default="params",
-                    help="figure layout: 'params' = one figure per "
-                         "parameter value (default); 'geometry' = one "
-                         "figure per alignment combination")
+    ap.add_argument("--mode", choices=["combo", "geometry",
+                                        "param", "params"],
+                    default="combo",
+                    help="figure layout: 'combo' (default) = one figure "
+                         "per full parameter combination "
+                         "(src=0,dst=3,dir=1 ...); 'param' = one figure "
+                         "per parameter value (median over the rest)")
     ap.add_argument("--fmt", choices=["png", "pdf", "svg"], default="png",
                     help="image format (default: png)")
     ap.add_argument("--dpi", type=int, default=150)
@@ -410,14 +434,14 @@ def main(argv=None):
     cache_label = human_size(args.cache_size)
 
     # Build the list of figures first (so --max-figs can be checked).
+    mode = "combo" if args.mode in ("combo", "geometry") else "param"
     jobs = []
     for fname, fdata in sorted(funcs.items()):
-        if args.mode == "params":
+        if mode == "param":
             js = job_params(fname, fdata["ifuncs"], fdata["rows"],
                             args.param)
         else:
-            js = job_geometry(fname, fdata["ifuncs"], fdata["rows"],
-                              args.param)
+            js = job_combo(fname, fdata["ifuncs"], fdata["rows"])
         jobs.extend(js)
 
     patterns = [p.lower() for p in args.match]
