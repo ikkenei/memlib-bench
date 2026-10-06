@@ -73,13 +73,17 @@ mb                   CLI (Python 3.6+, stdlib only; optional jsonschema/matplotl
 LICENSE              MIT license for the original code
 src/                 framework and drivers
   bench_common.[ch]    guard-page buffers, implementation registry, crash reporter
-  bench_drv.[ch]       option parsing, adaptive iteration policy
+  bench_drv.[ch]       option parsing, adaptive iteration policy, embedded matrices
+  bench_driver.[ch]    shared driver core: main flow, matrix runner, warm-up/
+                       measurement loops, repeats, JSON, check dispatch
   timing.h             timer (cntvct_el0 on aarch64, clock_gettime elsewhere)
   check.[ch]           correctness engine (byte-wise oracle)
   generic_ref.[ch]     generic C reference + oracle functions
   matrix.[ch]          matrix-profile parser
   json-lib.[ch]        (vendored from glibc) JSON writer, glibc format
   bench_memcpy.c / bench_memmove.c / bench_memset.c / bench_memcmp.c
+                       (thin per-function descriptions: signature, generic
+                       reference, oracle, case geometry, JSON attributes)
 impls/               put your implementations here (see below)
 tools/               (vendored from glibc benchtests/scripts)
   compare_strings.py, plot_strings.py, benchout_strings.schema.json, ...
@@ -322,6 +326,41 @@ a file and running `make` (or just `./mb run ...`, which rebuilds automatically)
 applies the change; `./mb run --matrix matrices/glibc_small.txt ...` runs the same
 matrix from the file without rebuilding.  The alignment mask applied by `do_test`
 (`& (page-1)` for the copy functions, `& 4095` for `memset`/`memcmp`) is unchanged.
+
+## Adding a benchmarked function
+
+All the shared machinery lives in `src/bench_driver.[ch]`; each driver is a thin
+description of one function (about 60 lines).  Adding another function (say
+`bzero`, which has the `memset` signature) means:
+
+1. add its section to the matrix profiles (`matrices/glibc_small.txt`, ...),
+2. write `src/bench_bzero.c` with two callbacks - `prepare()` turns a matrix case
+   into pointers plus content, `attrs()` writes its JSON attributes - and a
+   descriptor:
+
+   ```c
+   static int prepare (const mb_case_t *c, int dir, mb_pointers_t *p) { ... }
+   static void attrs (json_ctx_t *ctx, const mb_case_t *c,
+                      const mb_pointers_t *p) { ... }
+
+   static const mb_func_t the_function = {
+     .name = "bzero", .sig = MB_SIG_FILL,
+     .generic_ref = (mb_fn_t) mb_ref_memset,
+     .w_oracle = mb_oracle_memset,
+     .prepare = prepare, .attrs = attrs,
+   };
+
+   int main (int argc, char **argv)
+   {
+     return mb_driver_main (&the_function, argc, argv);
+   }
+   ```
+
+3. add a build rule (copy one of the `build/bench_*` rules in the Makefile) and
+   the name to `FUNCS` in `cli/mb.py`.
+
+`MB_SIG_COPY` / `MB_SIG_MOVE` / `MB_SIG_FILL` / `MB_SIG_CMP` select the measured
+call and the warm-up/measurement loop, so no timing code is duplicated.
 
 ## Correctness check (`mb check`)
 

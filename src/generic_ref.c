@@ -22,23 +22,24 @@
 /* Byte-wise oracles (ground truth)                                    */
 /* ------------------------------------------------------------------ */
 
-void *
-mb_oracle_memcpy (void *dst, const void *src, size_t n)
+void
+mb_oracle_memcpy (void *dst, const void *src, int c, size_t n)
 {
+  (void) c;
   unsigned char *d = dst;
   const unsigned char *s = src;
   for (size_t i = 0; i < n; i++)
     d[i] = s[i];
-  return dst;
 }
 
-void *
-mb_oracle_memmove (void *dst, const void *src, size_t n)
+void
+mb_oracle_memmove (void *dst, const void *src, int c, size_t n)
 {
+  (void) c;
   unsigned char *d = dst;
   const unsigned char *s = src;
   if (d == s || n == 0)
-    return dst;
+    return;
   if (d < s)
     {
       for (size_t i = 0; i < n; i++)
@@ -53,17 +54,16 @@ mb_oracle_memmove (void *dst, const void *src, size_t n)
 	  d[i] = s[i];
 	}
     }
-  return dst;
 }
 
-void *
-mb_oracle_memset (void *dst, int c, size_t n)
+void
+mb_oracle_memset (void *dst, const void *src, int c, size_t n)
 {
+  (void) src;
   unsigned char v = (unsigned char) c;
   unsigned char *d = dst;
   for (size_t i = 0; i < n; i++)
     d[i] = v;
-  return dst;
 }
 
 int
