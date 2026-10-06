@@ -429,18 +429,17 @@ additionally validates the oracle itself.
 
 ## Throughput graphs (`mb plot`, `tools/plot_mem.py`)
 
-Reads a benchout JSON file and plots **GB/s = bytes/ns** vs size. By default **every
-full parameter combination gets its own figure** — `src=1,dst=1` and `src=1,dst=2`
-are different code paths, and the four `memset` `align`/`fill` combinations are four
-different algorithms. Inside a figure the curves are the implementations:
+Reads a benchout JSON file and plots **GB/s = bytes/ns** vs size, with every
+implementation as a colored curve:
 
 ```sh
-./mb plot results/latest.json -o plots                   # all functions, all combos
-./mb plot res.json --func memcpy --func memset            # subset
-./mb plot res.json --match 'dst=0'                        # combos containing dst=0
-./mb plot res.json --func memcpy --match 'dir=1'          # one direction
-./mb plot res.json --mode param --param src --param fill  # per-parameter view
-./mb plot --help                                          # all options
+./mb plot results/latest.json -o plots                    # all functions, all combos
+./mb plot res.json --func memcpy --func memset             # subset
+./mb plot res.json --match 'dst=0'                         # combos containing dst=0
+./mb plot res.json --mode param --param src --param fill   # per-parameter view
+./mb plot res.json --stats mean --band p5-p95              # mean curve + spread
+./mb plot res.json --xlog --cache-size auto                # log axis + L1 marker
+./mb plot --help                                           # all options
 ```
 
 `mb plot` forwards its arguments to `tools/plot_mem.py`, so the script can also be
@@ -448,30 +447,38 @@ invoked directly (`python3 tools/plot_mem.py ...`). The glibc-style timing plots
 (absolute timings, relative/max/throughput variants, graphs by variant) remain
 available as `mb plot-glibc` (`tools/plot_strings.py`).
 
-- **Combinations are figures** (default): one figure per combination of the matrix
-  parameters, named with friendly parameter names — `src`/`align1`, `dst`/`align2`,
-  `align`/`alignment`, `fill`/`char`, `result`, `dir`/`dst > src`. Examples:
-  `memcpy_src_0_dst_3_dir_1.png`, `memmove_src_0_dst_7.png`,
-  `memset_align_1_fill_255.png`, `memcmp_src_0_dst_3_result_-1.png`. The combination
-  is also shown in the figure title.
-- **Implementations are curves**: all registered implementations are drawn on every
-  figure with distinct colors and a shared legend.
-- **`--mode param`** switches to the per-parameter view: one figure per parameter
-  *value*, with a median over the remaining parameters (stated in the title) — handy
-  to see the sensitivity to a single parameter (`memcpy_src_0.png`,
-  `memset_fill_255.png`).
-- **Size labels** on the x axis are rendered as `B`, `KB` or `MB` depending on
-  magnitude; the axis switches to a base-2 logarithmic scale automatically when the
-  range spans more than a decade (`--xlog`/`--xlinear` force it).
-- A vertical dashed line marks the L1 data-cache size when the size range covers it:
-  the default is auto-detected from sysfs (no platform-specific fallback — when it
-  cannot be determined the line is omitted), `--cache-size N` sets it explicitly,
-  `--cache-size 0` disables the line.
-- Full glibc matrices produce many combinations; `--max-figs N` guards against
-  accidental floods and `--func`/`--match`/`--param` narrow the selection down.
-- Options: `--func`, `--param`, `--match`, `--mode combo|param`, `--cache-size`,
-  `--fmt png|pdf|svg`, `--dpi`, `--xlog`/`--xlinear`, `--max-figs N`.
-  Only requires `matplotlib`; Python >= 3.6.
+**Layout (`--mode`):**
+
+| Mode | Figures |
+|---|---|
+| `combo` (default) | one figure per full parameter combination - every combination of the non-length attributes: `memcpy_src_0_dst_3_dir_1.png`, `memset_align_1_fill_255.png`, `memcmp_src_0_dst_3_result_-1.png` |
+| `geometry` | alias of `combo` (the combination is the case "geometry"); kept for older commands |
+| `param` | one figure per parameter value - `memcpy_src_0.png`, `memset_fill_255.png`, `memcmp_result_-1.png`; the remaining parameters are aggregated |
+| `params` | alias of `param` (plural spelling) |
+
+**Curves and statistics:**
+
+- every implementation is one curve; in `param` mode the samples of a point are the
+  repetitions plus the aggregated parameter combinations.
+- `--stats median|mean|min|max` picks the plotted value (default `median`);
+  `--band none|min-max|p5-p95|ci95` adds a semi-transparent band computed from the
+  same samples (percentile range, full range, or the 95% t confidence interval).
+  The title records the composition, e.g. `GB/s, mean of 5 runs, p5-p95 band`.
+- `--repeat N` at benchmark time is what makes the bands meaningful; without
+  repetitions a band is only drawn where several samples happen to share a point.
+
+**Axes:** the x axis starts at zero and uses round tick values (powers of two of the
+display unit: `0, 8, 16 ... 64 B` or `0, 16 KB ... 128 KB`) - `--xlog` switches to a
+base-2 log axis with power-of-two ticks.  The y axis starts at zero as well;
+`--xlim LO[,HI]` and `--ylim LO[,HI]` set explicit ranges (bytes / GB/s).
+
+**Cache marker:** nothing is drawn by default, because the machine that produced the
+JSON is often not the one analysing it.  Use `--cache-size N` for an explicit byte
+count (`0x10000` works) or `--cache-size auto` to read the L1 data-cache size from
+sysfs of the *current* machine.
+
+Other options: `--func`, `--param`, `--match`, `--fmt png|pdf|svg`, `--dpi`,
+`--max-figs N`.  Only requires `matplotlib`; Python >= 3.6.
 
 ## Methodology (glibc benchtests)
 
