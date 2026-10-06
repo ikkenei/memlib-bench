@@ -39,6 +39,21 @@
 #define MB_DEF_MIN_ITERS 8	/* lower bound on iterations	*/
 #define MB_DEF_MAX_ITERS (1u << 21)	/* upper bound		*/
 
+/* How each matrix case is measured.  */
+enum
+{
+  MB_MEASURE_HOT = 0,		/* repeat the same call in a hot loop	*/
+  MB_MEASURE_OFFSETS,		/* fixed sizes, random offsets per call	*/
+  MB_MEASURE_MIXED		/* random sizes and offsets per call	*/
+};
+
+/* How the number of iterations is chosen.  */
+enum
+{
+  MB_ITERS_BUDGET = 0,		/* fixed byte budget, decided up front	*/
+  MB_ITERS_PRECISION		/* grow until the estimate settles	*/
+};
+
 typedef struct
 {
   int check;			/* correctness mode		*/
@@ -53,6 +68,17 @@ typedef struct
   long repeat;			/* measurements per test (>=1)	*/
   unsigned long seed;		/* pattern seed		*/
   const char *matrix;		/* matrix profile file		*/
+  int measure;			/* MB_MEASURE_*			*/
+  long batch;			/* calls per randomized batch		*/
+  long mismatch_at;		/* memcmp: mismatch at byte N-1 (0 = off) */
+  int iters_mode;		/* MB_ITERS_*			*/
+  double epsilon;		/* precision mode target		*/
+  double scaling;		/* precision mode growth factor		*/
+  long initial_iters;		/* precision mode first sample size	*/
+  long min_samples;		/* precision mode limits		*/
+  long max_samples;
+  double min_duration;		/* seconds				*/
+  double max_duration;
   char impl_paths[32][1024];	/* custom impl shared objects	*/
   char impl_labels[32][128];
   int impl_count;

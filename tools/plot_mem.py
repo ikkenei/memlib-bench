@@ -67,7 +67,7 @@ PALETTE = [
 # The x axis (size), the measurement array and the repetition index are
 # not "parameters" (repetitions of one case are aggregated together).
 XKEY = "length"
-META_KEYS = ("length", "timings", "run")
+META_KEYS = ("length", "timings", "run", "batch", "iters")
 
 # Canonical display order of the parameters (friendly names).
 PARAM_ORDER = ["align1", "align2", "alignment", "char", "fill",

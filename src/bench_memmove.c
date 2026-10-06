@@ -28,8 +28,9 @@ prepare (const mb_case_t *c, int dir, mb_pointers_t *p)
   char *s1 = (char *) (mb_buf2.base + a1);	/* source	*/
   char *s2 = (char *) (mb_buf2.base + a2);	/* destination	*/
 
-  for (size_t i = 0, j = 1; i < c->len; i++, j += 23)
-    s1[i] = (char) j;
+  if (mb_opts->measure == MB_MEASURE_HOT)
+    for (size_t i = 0, j = 1; i < c->len; i++, j += 23)
+      s1[i] = (char) j;
 
   p->dst = s2;
   p->src = s1;

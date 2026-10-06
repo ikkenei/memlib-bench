@@ -26,8 +26,12 @@ prepare (const mb_case_t *c, int dir, mb_pointers_t *p)
   char *s1 = (char *) (dir ? mb_buf2.base + a1 : mb_buf1.base + a1);
   char *s2 = (char *) (dir ? mb_buf1.base + a2 : mb_buf2.base + a2);
 
-  for (size_t i = 0, j = 1; i < c->len; i++, j += 23)
-    s1[i] = (char) j;
+  /* The source content does not matter for the measurement (the
+     buffers are pre-filled once), and filling it per batch element would
+     dominate the run for large sizes.  */
+  if (mb_opts->measure == MB_MEASURE_HOT)
+    for (size_t i = 0, j = 1; i < c->len; i++, j += 23)
+      s1[i] = (char) j;
 
   p->dst = s2;
   p->src = s1;

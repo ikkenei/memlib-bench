@@ -19,7 +19,11 @@ benchmark **your own** implementations of these functions on real hardware.
 - Emit **glibc-compatible JSON** (benchout schema) and render comparison tables
   (`mb run`, `--table full`) or **GB/s throughput graphs** (`tools/plot_mem.py`).
 - Repeat every measurement (`--repeat N`) and get statistics (median/min/max/mean,
-  repeat noise) in the summary; each run is kept in the JSON.
+  coefficient of variation, 95% CI) in the summary; each run is kept in the JSON.
+- Choose the measurement methodology (`--measure`): the glibc-style hot loop
+  (default), randomized offsets, or a mixed stream of random sizes and offsets
+  (as in llvm-libc's benchmarks); optional precision-driven iteration control
+  (`--iters-mode precision`).
 
 The project is self-contained: it needs no glibc build system, and the pieces taken
 from glibc (see [License & provenance](#license--provenance)) were vendored because
@@ -187,6 +191,14 @@ tables defaults to `libc` (then the first implementation); change it with `-b/--
 | `--matrix FILE` | run the sizes/offsets from a matrix profile (below) |
 | `--seed N` | pattern seed for `--check` |
 | `--repeat N` | measure every test N times (each run is stored in the JSON) |
+| `--measure hot\|offsets\|mixed` | measurement mode (default `hot`, see below) |
+| `--batch N` | calls per randomized batch in `offsets`/`mixed` (default 1024) |
+| `--iters-mode budget\|precision` | iteration policy (default `budget`) |
+| `--epsilon X` | precision target for `--iters-mode precision` (default 0.01) |
+| `--scaling X` | iteration growth factor in precision mode (default 1.4) |
+| `--initial-iters` / `--min-samples` / `--max-samples` | precision mode limits |
+| `--min-duration` / `--max-duration` | precision mode time limits (s) |
+| `--mismatch-at N` | `memcmp`: place the mismatch at byte N-1 |
 | `--summary combo\|size` | summary layout (default `combo`: combinations × size regions) |
 | `--regions LIST` | size-region boundaries for `--summary combo` (default `16,64,512,4096,65536`) |
 | `--stats median\|min\|max\|mean` | statistic over repeated runs (default `median`) |
@@ -232,8 +244,49 @@ cells: geo-mean GB/s over the sizes in the region (statistic: median of 3 runs; 
 `--repeat N` measures every test N times (after the warm-up and with the same
 iteration budget).  Every run is a separate object in the JSON, tagged with
 `"run": k`, so the raw data can be analysed per run; the summary reports the chosen
-statistic plus a repeat-noise line (median and max coefficient of variation), and
+statistic plus a statistics line - median/max coefficient of variation and the
+median 95% confidence interval (t-distribution) over the cells - and
 `tools/plot_mem.py` aggregates the runs with a median.
+
+## Measurement modes (`--measure`)
+
+The default mode repeats *one* call in a hot loop, exactly like glibc's benchtests.
+That is fast and reproducible, but the branch predictor learns the call - both the
+size-dependent branches and the alignment - so small sizes are measured under
+idealized conditions.  Two additional modes (modelled on llvm-libc's benchmarks)
+measure the same functions with randomized parameters:
+
+| Mode | Parameters | Reported as |
+|---|---|---|
+| `hot` (default) | the same size and offsets every call | one object per matrix case |
+| `offsets` | the matrix sizes; **random offsets** on every call | one object per matrix case (`offsets="random"`) |
+| `mixed` | **random sizes** (drawn from the matrix's size pool) and **random offsets** | one object per (fill byte / expected result) group and repetition |
+
+```sh
+./mb run memcpy --measure offsets --batch 1024 --repeat 5   # average over misalignment
+./mb run memcpy --measure mixed   --batch 1024 --repeat 5   # random size stream
+./mb run memcpy --measure offsets --seed 12345              # reproducible batches
+```
+
+- In `offsets`/`mixed` a *batch* of `--batch` calls is prepared (randomized with
+  `--seed`), warmed up and then cycled inside the timed loop, so the measured call
+  sees varying parameters and the predictor cannot specialize.  `memmove` keeps the
+  overlap distance of the matrix case while the offset moves; the other functions
+  randomize the offsets independently within a page.
+- `offsets` keeps one result per size, so the plots and the summary stay comparable
+  with `hot`; `mixed` reports a single average per batch (`length` is the mean size,
+  `sizes="min..max"` is the pool) - it is meant for the summary table, not for
+  per-size graphs.
+- Neither mode is directly comparable with `hot`/glibc numbers: they include the
+  cost of unpredictable branches and misalignment on purpose.
+- `--iters-mode precision` (with `--epsilon`, `--scaling`, `--min-samples`,
+  `--max-samples`, `--min-duration`, `--max-duration`) replaces the byte budget with
+  llvm-libc's stopping rule: iterations grow geometrically until the running mean
+  settles within `--epsilon`; the value is the cumulative mean.
+- `--mismatch-at N` (memcmp) moves the difference from the last byte of the range to
+  byte `N-1`, which exercises early exit.
+- Diagnostics: `MB_DEBUG_BATCH=1` prints the first batch parameters,
+  `MB_DEBUG_PRECISION=1` prints the samples/calls used per precision measurement.
 
 ## Matrix profiles (`--matrix FILE`)
 

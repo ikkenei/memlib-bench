@@ -192,7 +192,16 @@ def driver_cmd(fn, args, impls, check):
     for opt, attr in (("--iters", "iters"), ("--budget", "budget"),
                       ("--max-len", "max_len"), ("--seed", "seed"),
                       ("--min-iters", "min_iters"),
-                      ("--repeat", "repeat")):
+                      ("--repeat", "repeat"),
+                      ("--measure", "measure"), ("--batch", "batch"),
+                      ("--iters-mode", "iters_mode"),
+                      ("--epsilon", "epsilon"), ("--scaling", "scaling"),
+                      ("--initial-iters", "initial_iters"),
+                      ("--min-samples", "min_samples"),
+                      ("--max-samples", "max_samples"),
+                      ("--min-duration", "min_duration"),
+                      ("--max-duration", "max_duration"),
+                      ("--mismatch-at", "mismatch_at")):
         v = getattr(args, attr, None)
         if v:
             cmd += [opt, str(v)]
@@ -329,7 +338,9 @@ PARAM_DISPLAY = {
 }
 PARAM_ORDER = ["align1", "align2", "alignment", "char", "fill",
                "result", "dst > src", "dst>src"]
-SUMMARY_META = ("length", "timings", "run")
+# Attributes that are not part of a row's identity: the x axis, the
+# measurements and the bookkeeping of repeats/batches.
+SUMMARY_META = ("length", "timings", "run", "batch", "iters")
 DEFAULT_REGIONS = "16,64,512,4096,65536"
 
 
@@ -416,6 +427,36 @@ def _cov(vals):
     return (var ** 0.5) / m * 100.0
 
 
+# Two-sided 95% t quantiles for small samples (else the normal 1.96).
+_T95 = {2: 12.706, 3: 4.303, 4: 3.182, 5: 2.776, 6: 2.571, 7: 2.447,
+        8: 2.365, 9: 2.306, 10: 2.262, 12: 2.201, 15: 2.131, 20: 2.086,
+        25: 2.060, 30: 2.042}
+
+
+def _t95(n):
+    if n < 2:
+        return None
+    if n in _T95:
+        return _T95[n]
+    if n >= 30:
+        return 1.96
+    keys = [k for k in _T95 if k < n]
+    return _T95[max(keys)] if keys else _T95[2]
+
+
+def _ci95(vals):
+    """Relative half-width of the 95% confidence interval, in percent."""
+    n = len(vals)
+    t = _t95(n)
+    if t is None:
+        return None
+    m = sum(vals) / float(n)
+    if m <= 0:
+        return None
+    var = sum((x - m) ** 2 for x in vals) / float(n - 1)
+    return t * (var ** 0.5) / (float(n) ** 0.5) / m * 100.0
+
+
 def _collect_samples(func_data):
     """samples[(combo, length)][impl] = [ns, ...] plus metadata."""
     ifuncs = func_data.get("ifuncs", [])
@@ -472,10 +513,11 @@ def summary_by_combo(func_data, fn, args):
     # cell[(combo, impl, region)] = geo-mean GB/s; noise[...] = median CoV
     cell = {}
     noise = {}
+    cis = {}
     for combo in combos:
         for i, impl in enumerate(ifuncs):
             for r in regions:
-                rates, covs = [], []
+                rates, covs, civs = [], [], []
                 for length in by_region[r]:
                     vals = samples.get((combo, length), {}).get(i)
                     if not vals:
@@ -486,12 +528,18 @@ def summary_by_combo(func_data, fn, args):
                     cv = _cov(vals)
                     if cv is not None:
                         covs.append(cv)
+                    ci = _ci95(vals)
+                    if ci is not None:
+                        civs.append(ci)
                 if rates:
                     g = math.exp(sum(math.log(x) for x in rates) / len(rates))
                     cell[(combo, i, r)] = g
                 if covs:
                     covs.sort()
                     noise[(combo, i, r)] = covs[len(covs) // 2]
+                if civs:
+                    civs.sort()
+                    cis[(combo, i, r)] = civs[len(civs) // 2]
 
     header = [" " * 2 + "%-*s" % (max(14, max(len(n) for n in ifuncs) + 2),
                                   "combinations / GB/s")
@@ -530,11 +578,17 @@ def summary_by_combo(func_data, fn, args):
         line = []
         for i, impl in enumerate(ifuncs):
             covs = sorted(v for (c, j, r), v in noise.items() if j == i)
+            civs = sorted(v for (c, j, r), v in cis.items() if j == i)
+            bits = []
             if covs:
-                line.append("%s: median %.1f%%, max %.1f%%"
-                            % (impl, covs[len(covs) // 2], covs[-1]))
+                bits.append("CoV median %.1f%%, max %.1f%%"
+                            % (covs[len(covs) // 2], covs[-1]))
+            if civs:
+                bits.append("95%% CI \u00b1%.1f%%" % civs[len(civs) // 2])
+            if bits:
+                line.append("%s: %s" % (impl, ", ".join(bits)))
         if line:
-            print("  repeat noise (CoV over %d runs): %s"
+            print("  repeat statistics (%d runs, median over cells): %s"
                   % (runs, "; ".join(line)))
 
     if getattr(args, "gmean", False):
@@ -613,6 +667,35 @@ def summary_by_size(func_data, fn, base, gmean_only, match=None):
                 cell += " %s" % pct(gm, math.exp(gsum[idx[base]] / gcnt))
             cells.append("%14s" % cell)
         print("%9s %9s | %s" % ("geo-mean", "", " ".join(cells)))
+
+    if runs > 1:
+        line = []
+        for i, impl in enumerate(ifuncs):
+            covs, civs = [], []
+            for samples_i in by_len.values():
+                vals = sorted(s[i] for s in samples_i
+                              if i < len(s) and s[i] > 0)
+                if len(vals) < 2:
+                    continue
+                cv = _cov(vals)
+                ci = _ci95(vals)
+                if cv is not None:
+                    covs.append(cv)
+                if ci is not None:
+                    civs.append(ci)
+            bits = []
+            if covs:
+                covs.sort()
+                bits.append("CoV median %.1f%%, max %.1f%%"
+                            % (covs[len(covs) // 2], covs[-1]))
+            if civs:
+                civs.sort()
+                bits.append("95%% CI \u00b1%.1f%%" % civs[len(civs) // 2])
+            if bits:
+                line.append("%s: %s" % (impl, ", ".join(bits)))
+        if line:
+            print("repeat statistics (%d runs, median over sizes): %s"
+                  % (runs, "; ".join(line)))
     print()
 
 
@@ -860,6 +943,40 @@ def build_parser():
     r.add_argument("--match", default=None,
                    help="only summary rows whose combination label "
                         "contains this substring")
+    r.add_argument("--measure", choices=["hot", "offsets", "mixed"],
+                   default=None,
+                   help="measurement mode: hot (default) repeats each case; "
+                        "offsets keeps the matrix sizes but randomizes the "
+                        "offsets per call; mixed draws sizes and offsets "
+                        "randomly (one result per batch)")
+    r.add_argument("--batch", type=int, default=None,
+                   help="calls per randomized batch in --measure "
+                        "offsets/mixed (default 1024)")
+    r.add_argument("--iters-mode", choices=["budget", "precision"],
+                   default=None,
+                   help="iteration policy: budget (default) or precision "
+                        "(grow the iteration count until the estimate "
+                        "settles within --epsilon)")
+    r.add_argument("--epsilon", type=float, default=None,
+                   help="precision target for --iters-mode precision "
+                        "(default 0.01 = 1%%)")
+    r.add_argument("--scaling", type=float, default=None,
+                   help="iteration growth factor in precision mode "
+                        "(default 1.4)")
+    r.add_argument("--initial-iters", type=int, default=None,
+                   help="first sample size in precision mode (default 1)")
+    r.add_argument("--min-samples", type=int, default=None,
+                   help="precision mode: minimum samples (default 4)")
+    r.add_argument("--max-samples", type=int, default=None,
+                   help="precision mode: maximum samples (default 1000)")
+    r.add_argument("--min-duration", type=float, default=None,
+                   help="precision mode: minimum time per measurement, s")
+    r.add_argument("--max-duration", type=float, default=None,
+                   help="precision mode: maximum time per measurement, s "
+                        "(default 10)")
+    r.add_argument("--mismatch-at", type=int, default=None,
+                   help="memcmp: place the mismatch at byte N-1 "
+                        "(default: matrix-defined)")
     r.add_argument("--no-table", action="store_true",
                    help="do not print any table")
     r.set_defaults(handler=do_run)

@@ -25,6 +25,17 @@ mb_opts_defaults (mb_opts_t *o)
   o->max_iters = MB_DEF_MAX_ITERS;
   o->seed = 0x1234abcd;
   o->repeat = 1;
+  o->measure = MB_MEASURE_HOT;
+  o->batch = 1024;
+  o->mismatch_at = 0;
+  o->iters_mode = MB_ITERS_BUDGET;
+  o->epsilon = 0.01;
+  o->scaling = 1.4;
+  o->initial_iters = 1;
+  o->min_samples = 4;
+  o->max_samples = 1000;
+  o->min_duration = 0.0;
+  o->max_duration = 10.0;
 }
 
 static const char *
@@ -160,6 +171,68 @@ mb_opts_parse (mb_opts_t *o, int argc, char **argv, const char *func_symbol,
 							    "--seed", v));
 	  else if (strcmp (key, "matrix") == 0)
 	    o->matrix = next_arg (argc, argv, &i, "--matrix", v);
+	  else if (strcmp (key, "measure") == 0)
+	    {
+	      const char *m = next_arg (argc, argv, &i, "--measure", v);
+	      if (strcmp (m, "hot") == 0)
+	        o->measure = MB_MEASURE_HOT;
+	      else if (strcmp (m, "offsets") == 0)
+	        o->measure = MB_MEASURE_OFFSETS;
+	      else if (strcmp (m, "mixed") == 0)
+	        o->measure = MB_MEASURE_MIXED;
+	      else
+	        {
+	          fprintf (stderr, "unknown --measure mode: %s\n", m);
+	          exit (2);
+	        }
+	    }
+	  else if (strcmp (key, "batch") == 0)
+	    o->batch = parse_long ("--batch",
+	                           next_arg (argc, argv, &i, "--batch", v));
+	  else if (strcmp (key, "mismatch-at") == 0)
+	    o->mismatch_at = parse_long ("--mismatch-at",
+	                                 next_arg (argc, argv, &i,
+	                                           "--mismatch-at", v));
+	  else if (strcmp (key, "iters-mode") == 0)
+	    {
+	      const char *m = next_arg (argc, argv, &i, "--iters-mode", v);
+	      if (strcmp (m, "budget") == 0)
+	        o->iters_mode = MB_ITERS_BUDGET;
+	      else if (strcmp (m, "precision") == 0)
+	        o->iters_mode = MB_ITERS_PRECISION;
+	      else
+	        {
+	          fprintf (stderr, "unknown --iters-mode: %s\n", m);
+	          exit (2);
+	        }
+	    }
+	  else if (strcmp (key, "epsilon") == 0)
+	    o->epsilon = parse_double ("--epsilon",
+	                               next_arg (argc, argv, &i, "--epsilon", v));
+	  else if (strcmp (key, "scaling") == 0)
+	    o->scaling = parse_double ("--scaling",
+	                               next_arg (argc, argv, &i, "--scaling", v));
+	  else if (strcmp (key, "initial-iters") == 0)
+	    o->initial_iters = parse_long ("--initial-iters",
+	                                     next_arg (argc, argv, &i,
+	                                               "--initial-iters", v));
+	  else if (strcmp (key, "min-samples") == 0)
+	    o->min_samples = parse_long ("--min-samples",
+	                                   next_arg (argc, argv, &i,
+	                                             "--min-samples", v));
+	  else if (strcmp (key, "max-samples") == 0)
+	    o->max_samples = parse_long ("--max-samples",
+	                                   next_arg (argc, argv, &i,
+	                                             "--max-samples", v));
+	  else if (strcmp (key, "min-duration") == 0)
+	    o->min_duration = parse_double ("--min-duration",
+	                                    next_arg (argc, argv, &i,
+	                                              "--min-duration", v));
+	  else if (strcmp (key, "max-duration") == 0)
+	    o->max_duration = parse_double ("--max-duration",
+	                                    next_arg (argc, argv, &i,
+	                                              "--max-duration", v));
+
 	  else if (strcmp (key, "repeat") == 0)
 	    o->repeat = parse_long ("--repeat",
 	  			    next_arg (argc, argv, &i, "--repeat", v));
@@ -196,6 +269,34 @@ mb_opts_parse (mb_opts_t *o, int argc, char **argv, const char *func_symbol,
     o->repeat = 1;
   if (o->repeat > 10000)
     o->repeat = 10000;
+  if (o->batch < 1)
+    o->batch = 1;
+  if (o->batch > (1L << 20))
+    o->batch = 1L << 20;
+  if (o->mismatch_at < 0)
+    o->mismatch_at = 0;
+  if (o->epsilon <= 0.0)
+    o->epsilon = 0.01;
+  if (o->scaling < 1.05)
+    o->scaling = 1.05;
+  if (o->scaling > 10.0)
+    o->scaling = 10.0;
+  if (o->initial_iters < 1)
+    o->initial_iters = 1;
+  if (o->min_samples < 1)
+    o->min_samples = 1;
+  if (o->max_samples < o->min_samples)
+    o->max_samples = o->min_samples;
+  if (o->min_duration < 0.0)
+    o->min_duration = 0.0;
+  if (o->max_duration < o->min_duration)
+    o->max_duration = o->min_duration;
+  if (o->iters_mode == MB_ITERS_PRECISION && o->fixed_iters > 0)
+    {
+      fprintf (stderr, "--iters and --iters-mode precision are mutually "
+               "exclusive\n");
+      exit (2);
+    }
 
   if (o->quick)
     {
@@ -246,6 +347,21 @@ mb_opts_usage (const char *argv0, const char *func_symbol,
     "                             offsets) instead of the built-in matrix\n"
     "      --repeat N             measure every test N times; each run is\n"
     "                             emitted separately (default 1)\n"
+    "      --measure MODE         hot (default): repeat the same call;\n"
+    "                             offsets: fixed sizes, random offsets per\n"
+    "                             call; mixed: random sizes and offsets\n"
+    "                             per call (one result per batch)\n"
+    "      --batch N              calls per randomized batch (default 1024)\n"
+    "      --iters-mode MODE      budget (default) or precision (grow the\n"
+    "                             iteration count until the estimate settles)\n"
+    "      --epsilon X            precision target (default 0.01 = 1%%)\n"
+    "      --scaling X            iteration growth factor (default 1.4)\n"
+    "      --initial-iters N      first sample in precision mode (default 1)\n"
+    "      --min-samples N        precision mode minimum samples (default 4)\n"
+    "      --max-samples N        precision mode maximum samples (1000)\n"
+    "      --min-duration SEC     precision mode minimum time (default 0)\n"
+    "      --max-duration SEC     precision mode maximum time (default 10)\n"
+    "      --mismatch-at N        memcmp: mismatch at byte N-1 (0 = matrix)\n"
     "      --seed N               pattern seed for --check\n"
     "%s",
     argv0, func_symbol, func_symbol, MB_DEF_BUDGET_MIB,

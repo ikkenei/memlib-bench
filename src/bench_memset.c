@@ -40,6 +40,12 @@ attrs (json_ctx_t *ctx, const mb_case_t *c, const mb_pointers_t *p)
   json_attr_int (ctx, "char", c->c);
 }
 
+static void
+attrs_batch (json_ctx_t *ctx, const mb_case_t *c)
+{
+  json_attr_int (ctx, "char", c->c);
+}
+
 static const mb_func_t the_function = {
   .name = "memset",
   .sig = MB_SIG_FILL,
@@ -47,6 +53,7 @@ static const mb_func_t the_function = {
   .w_oracle = mb_oracle_memset,
   .prepare = prepare,
   .attrs = attrs,
+  .attrs_batch = attrs_batch,
 };
 
 int

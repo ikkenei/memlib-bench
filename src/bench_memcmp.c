@@ -29,14 +29,25 @@ prepare (const mb_case_t *c, int dir, mb_pointers_t *p)
   char *s1 = (char *) (mb_buf1.base + a1);
   char *s2 = (char *) (mb_buf2.base + a2);
 
-  for (size_t i = 0; i < c->len; i++)
-    s1[i] = s2[i] = (char) (1 + (23 * i) % 255);
+  if (mb_opts->measure == MB_MEASURE_HOT)
+    for (size_t i = 0; i < c->len; i++)
+      s1[i] = s2[i] = (char) (1 + (23 * i) % 255);
 
   if (c->len)
     {
+      /* Byte just past the compared range (as in glibc bench-memcmp).  */
       s1[c->len] = (char) a1;
       s2[c->len] = (char) a2;
-      s2[c->len - 1] -= (char) c->result;
+
+      /* Where the buffers differ: the last byte of the range, or the
+	 position requested with --mismatch-at.  */
+      size_t pos = c->len - 1;
+      if (mb_opts->mismatch_at > 0)
+	{
+	  size_t at = (size_t) mb_opts->mismatch_at;
+	  pos = at <= c->len ? at - 1 : c->len - 1;
+	}
+      s2[pos] -= (char) c->result;
     }
 
   p->dst = s1;
@@ -56,6 +67,12 @@ attrs (json_ctx_t *ctx, const mb_case_t *c, const mb_pointers_t *p)
   json_attr_int (ctx, "result", c->result);
 }
 
+static void
+attrs_batch (json_ctx_t *ctx, const mb_case_t *c)
+{
+  json_attr_int (ctx, "result", c->result);
+}
+
 static const mb_func_t the_function = {
   .name = "memcmp",
   .sig = MB_SIG_CMP,
@@ -63,6 +80,7 @@ static const mb_func_t the_function = {
   .c_oracle = mb_oracle_memcmp,
   .prepare = prepare,
   .attrs = attrs,
+  .attrs_batch = attrs_batch,
 };
 
 int

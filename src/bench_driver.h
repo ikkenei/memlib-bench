@@ -58,6 +58,10 @@ typedef struct
   /* Emit the JSON attributes of a case (before its "timings" array).  */
   void (*attrs) (json_ctx_t *ctx, const mb_case_t *c,
 		 const mb_pointers_t *p);
+
+  /* Optional: the function-specific parameters of a batch-mode result
+     (fill byte, expected result); offsets and sizes are randomized.  */
+  void (*attrs_batch) (json_ctx_t *ctx, const mb_case_t *c);
 } mb_func_t;
 
 /* Options of the running driver and the OS page size (set by
