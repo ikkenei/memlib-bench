@@ -1,0 +1,148 @@
+# glibc-style large-size matrices.
+#
+# Loaded automatically in addition to glibc_small.txt when --max-len is
+# above 128 KiB (131072); the tested sizes are capped by --max-len.
+# Sizes are listed up to 1 GiB so that any practical --max-len is covered.
+#
+# See matrices/glibc_small.txt for the syntax.
+
+[memcpy]
+
+case
+loop i = 17..30:1
+size = (1 << i) + 7
+pairs = (0,0)
+both = 1
+
+case
+loop i = 17..30:1
+size = (1 << i) + 15
+pairs = (0,3)
+both = 1
+
+case
+loop i = 17..30:1
+size = (1 << i) + 31
+pairs = (3,0)
+both = 1
+
+case
+loop i = 17..30:1
+size = (1 << i) + 63
+pairs = (3,5)
+both = 1
+
+case
+loop i = 17..30:1
+size = 1 << i
+pairs = (0,127)
+both = 1
+
+case
+loop i = 17..30:1
+size = 1 << i
+pairs = (0,255)
+both = 1
+
+case
+loop i = 17..30:1
+size = 1 << i
+pairs = (0,256)
+both = 1
+
+case
+loop i = 17..30:1
+size = 1 << i
+pairs = (0,4064)
+both = 1
+
+[memmove]
+
+case
+loop i = 17..30:1
+size = (1 << i) + 7
+pairs = (0,64)
+
+case
+loop i = 17..30:1
+size = (1 << i) + 15
+pairs = (0,3)
+
+case
+loop i = 17..30:1
+size = (1 << i) + 31
+pairs = (3,0)
+
+case
+loop i = 17..30:1
+size = (1 << i) + 63
+pairs = (3,7)
+
+case
+loop i = 17..30:1
+size = (1 << i) + 127
+pairs = (9,5)
+
+[memset]
+
+case
+loop i = 17..30:1
+size = 1 << i
+align = 0
+fill = 0
+
+case
+loop i = 17..30:1
+size = (1 << i) + 1
+align = 3
+fill = 0
+
+case
+loop i = 17..30:1
+size = 1 << i
+align = 0
+fill = -1
+
+case
+loop i = 17..30:1
+size = (1 << i) - 1
+align = 63
+fill = 0x80
+
+case
+loop i = 17..30:1
+size = (1 << i) + 3
+align = 0
+fill = 0x41
+
+[memcmp]
+
+case
+loop i = 17..30:1
+size = 1 << i
+pairs = (0,0)
+diff = 0
+
+case
+loop i = 17..30:1
+size = 1 << i
+pairs = (0,0)
+diff = 1
+
+case
+loop i = 17..30:1
+size = 1 << i
+pairs = (63,0)
+diff = 0
+
+case
+loop i = 17..30:1
+size = 1 << i
+pairs = (0,63)
+diff = -1
+
+case
+loop i = 17..30:1
+size = 1 << i
+pairs = (3,5)
+diff = 0

@@ -25,7 +25,12 @@ CFLAGS      ?= -O2 -g
 MB_ARCH     ?=
 WARN         = -Wall -Wextra
 STD          = -std=gnu11
-INCLUDES     = -Isrc
+INCLUDES     = -Isrc -I$(BUILD)/gen
+
+# glibc default matrices are compiled into the drivers from the .txt files.
+MATRIX_SMALL := matrices/glibc_small.txt
+MATRIX_LARGE := matrices/glibc_large.txt
+MATRIX_HDR   = $(BUILD)/gen/matrix_glibc.h
 
 # ------------------------------------------------------------------
 # Layout
@@ -76,14 +81,26 @@ impls: $(IMPL_SOS)
 clean:
 	rm -rf $(BUILD)
 
-$(OBJDIR) $(IMPLDIR) $(RESULTS):
+$(OBJDIR) $(IMPLDIR) $(RESULTS) $(BUILD)/gen:
 	mkdir -p $@
+
+# One C string per line; the drivers parse them like a --matrix file.
+$(MATRIX_HDR): $(MATRIX_SMALL) $(MATRIX_LARGE) | $(BUILD)/gen
+	{ echo 'static const char mb_glibc_small_text[] ='; \
+	  sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $(MATRIX_SMALL); \
+	  echo ';'; \
+	  echo 'static const char mb_glibc_large_text[] ='; \
+	  sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $(MATRIX_LARGE); \
+	  echo ';'; \
+	} > $@
 
 # ------------------------------------------------------------------
 # Benchmark drivers
 # ------------------------------------------------------------------
 $(OBJDIR)/%.o: src/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) $(WARN) $(STD) $(MB_ARCH) $(INCLUDES) -c -o $@ $<
+
+$(OBJDIR)/bench_drv.o: $(MATRIX_HDR)
 
 $(BUILD)/bench_memcpy: src/bench_memcpy.c $(COMMON_OBJS) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(STD) $(MB_ARCH) $(INCLUDES) -fno-builtin \

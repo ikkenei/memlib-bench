@@ -20,11 +20,9 @@
 typedef void *(*proto_t) (void *, const void *, size_t);
 
 #define FN_SYMBOL "memmove"
-#define MIN_PAGE_SIZE (131072)
 
 static const mb_opts_t *g_o;
 static size_t real_page;
-static size_t half_page;
 
 static void
 warm_impl (const mb_impl_t *impl, char *dst, char *src, size_t len,
@@ -102,66 +100,16 @@ do_test (json_ctx_t *json_ctx, size_t align1, size_t align2, size_t len)
     }
 }
 
-static void
-run_large (json_ctx_t *json_ctx)
-{
-  if (g_o->max_len <= (1u << 17))
-    return;
-  for (size_t l = (1u << 17); l <= g_o->max_len; l <<= 1)
-    {
-      do_test (json_ctx, 0, 64, l + 7);
-      do_test (json_ctx, 0, 3, l + 15);
-      do_test (json_ctx, 3, 0, l + 31);
-      do_test (json_ctx, 3, 7, l + 63);
-      do_test (json_ctx, 9, 5, l + 127);
-    }
-}
-
+/* Run the loaded matrix: every case is one do_test() call.  */
 static void
 run_matrix (json_ctx_t *json_ctx, const mb_matrix_t *m)
 {
-  for (size_t il = 0; il < m->nsizes; il++)
+  for (size_t k = 0; k < m->ncases; k++)
     {
-      size_t len = (size_t) m->sizes[il];
-
-      /* src and dst are the same offset list: run every unordered pair
-         in both directions (dst after src / dst before src).  */
-      if (m->nsrc == m->ndst)
-        {
-          int equal = 1;
-          for (size_t k = 0; k < m->nsrc; k++)
-            if (m->src[k] != m->dst[k])
-              equal = 0;
-          if (equal)
-            {
-              for (size_t i = 0; i < m->nsrc; i++)
-                for (size_t j = i + 1; j < m->nsrc; j++)
-                  {
-                    if (m->src[i] == m->src[j])
-                      continue;
-                    do_test (json_ctx, (size_t) m->src[i],
-                             (size_t) m->src[j], len);
-                    do_test (json_ctx, (size_t) m->src[j],
-                             (size_t) m->src[i], len);
-                  }
-              continue;
-            }
-        }
-
-      /* Independent src/dst lists: directed pairs; both=1 adds the
-         reversed direction as well.  */
-      for (size_t i = 0; i < m->nsrc; i++)
-        for (size_t j = 0; j < m->ndst; j++)
-          {
-            if (m->src[i] == m->dst[j])
-              continue;
-            do_test (json_ctx, (size_t) m->src[i], (size_t) m->dst[j], len);
-            if (m->both)
-              do_test (json_ctx, (size_t) m->dst[j], (size_t) m->src[i], len);
-          }
+      const mb_case_t *c = &m->cases[k];
+      do_test (json_ctx, (size_t) c->a1, (size_t) c->a2, c->len);
     }
 }
-
 
 /* --- correctness mode ---------------------------------------------- */
 
@@ -188,7 +136,6 @@ main (int argc, char **argv)
   mb_opts_defaults (&o);
 
   mb_install_crash_reporter ();
-
   mb_opts_parse (&o, argc, argv, FN_SYMBOL, NULL);
 
   if (mb_register_impls (&o, FN_SYMBOL, (mb_fn_t) mb_ref_memmove) < 0)
@@ -197,38 +144,36 @@ main (int argc, char **argv)
   real_page = (size_t) sysconf (_SC_PAGESIZE);
   if (real_page == (size_t) -1)
     real_page = 4096;
-  half_page = real_page / 2;
 
-  size_t want = o.max_len != 0 ? o.max_len : (MIN_PAGE_SIZE - 1);
+  /* Test matrix: a --matrix profile or the compiled-in glibc
+     defaults (small, plus the large matrix when --max-len is above
+     128 KiB).  */
   mb_matrix_t mx;
   mb_matrix_init (&mx);
-  int have_mx = 0;
-  if (!o.check && o.matrix != NULL)
+  if (!o.check)
     {
-      if (mb_matrix_load (o.matrix, FN_SYMBOL, &mx) != 0)
+      int rc = (o.matrix != NULL)
+        ? mb_matrix_load (o.matrix, FN_SYMBOL, &mx)
+        : mb_matrix_load_default (FN_SYMBOL, o.max_len > (1u << 17), &mx);
+      if (rc != 0)
         {
           fprintf (stderr, "error: %s\n", mb_matrix_err ());
           return 1;
         }
-      have_mx = 1;
-      if ((size_t) mb_matrix_max_size (&mx) > want)
-        want = (size_t) mb_matrix_max_size (&mx);
     }
-  if (have_mx && mx.nsrc == 0 && mx.ndst == 0)
-    {
-      fprintf (stderr, "error: [memmove] section must define a 'src' "
-               "and/or 'dst' offset list\n");
-      return 1;
-    }
-  if (mb_buffers_init (MIN_PAGE_SIZE, want) == 0)
+
+  size_t want = o.max_len != 0 ? o.max_len : (MB_MIN_PAGE_SIZE - 1);
+  if (!o.check && o.matrix != NULL
+      && (size_t) mb_matrix_max_len (&mx) > want)
+    want = (size_t) mb_matrix_max_len (&mx);
+  if (mb_buffers_init (MB_MIN_PAGE_SIZE, want) == 0)
     {
       fprintf (stderr, "error: cannot allocate benchmark buffers\n");
       return 1;
     }
 
   if (o.check)
-    return mb_check_write_run ("memmove", 1, &o, check_wimpl,
-			       check_woracle) ? 1 : 0;
+    return mb_check_write_run ("memmove", 1, &o, check_wimpl, check_woracle) ? 1 : 0;
 
   if (getenv ("MB_NO_WARMUP") == NULL)
     mb_warmup (0);
@@ -238,7 +183,7 @@ main (int argc, char **argv)
   json_document_begin (&json_ctx);
   json_attr_string (&json_ctx, "timing_type", MB_TIMING_TYPE);
   json_attr_object_begin (&json_ctx, "functions");
-  json_attr_object_begin (&json_ctx, "memmove");
+  json_attr_object_begin (&json_ctx, FN_SYMBOL);
   json_attr_string (&json_ctx, "bench-variant", "default");
 
   json_array_begin (&json_ctx, "ifuncs");
@@ -247,66 +192,9 @@ main (int argc, char **argv)
   json_array_end (&json_ctx);
 
   json_array_begin (&json_ctx, "results");
-
-  if (have_mx)
-    run_matrix (&json_ctx, &mx);
-  else
-    {
-      size_t i;
-  for (i = 0; i < 14; ++i)
-    {
-      do_test (&json_ctx, 0, 32, 1u << i);
-      do_test (&json_ctx, 32, 0, 1u << i);
-      do_test (&json_ctx, 0, i, 1u << i);
-      do_test (&json_ctx, i, 0, 1u << i);
-    }
-
-  for (i = 0; i < 32; ++i)
-    {
-      do_test (&json_ctx, 0, 32, i);
-      do_test (&json_ctx, 32, 0, i);
-      do_test (&json_ctx, 0, i, i);
-      do_test (&json_ctx, i, 0, i);
-    }
-
-  for (i = 3; i < 32; ++i)
-    {
-      if ((i & (i - 1)) == 0)
-	continue;
-      do_test (&json_ctx, 0, 32, 16 * i);
-      do_test (&json_ctx, 32, 0, 16 * i);
-      do_test (&json_ctx, 0, i, 16 * i);
-      do_test (&json_ctx, i, 0, 16 * i);
-    }
-
-  for (i = 32; i < 64; ++i)
-    {
-      do_test (&json_ctx, 0, 0, 32 * i);
-      do_test (&json_ctx, i, 0, 32 * i);
-      do_test (&json_ctx, 0, i, 32 * i);
-      do_test (&json_ctx, i, i, 32 * i);
-    }
-
-  for (i = 0; i <= 48; ++i)
-    {
-      do_test (&json_ctx, 0, 0, 2048 + 64 * i);
-      do_test (&json_ctx, i, 0, 2048 + 64 * i);
-      do_test (&json_ctx, 0, i, 2048 + 64 * i);
-      do_test (&json_ctx, i, i, 2048 + 64 * i);
-      do_test (&json_ctx, half_page, 0, 2048 + 64 * i);
-      do_test (&json_ctx, 0, half_page, 2048 + 64 * i);
-      do_test (&json_ctx, half_page + i, 0, 2048 + 64 * i);
-      do_test (&json_ctx, i, half_page, 2048 + 64 * i);
-      do_test (&json_ctx, half_page, i, 2048 + 64 * i);
-      do_test (&json_ctx, 0, half_page + i, 2048 + 64 * i);
-      do_test (&json_ctx, half_page + i, i, 2048 + 64 * i);
-      do_test (&json_ctx, i, half_page + i, 2048 + 64 * i);
-    }
-
-      run_large (&json_ctx);
-    }
-
+  run_matrix (&json_ctx, &mx);
   json_array_end (&json_ctx);
+
   json_attr_object_end (&json_ctx);
   json_attr_object_end (&json_ctx);
   json_document_end (&json_ctx);

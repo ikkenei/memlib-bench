@@ -27,7 +27,12 @@
 
 #include "bench_common.h"
 #include "json-lib.h"
+#include "matrix.h"
 #include "timing.h"
+
+/* Smallest buffer size (bytes) used by the drivers, like glibc's
+   MIN_PAGE_SIZE in bench-mem*.c.  */
+#define MB_MIN_PAGE_SIZE (131072)
 
 /* Default adaptive policy.  */
 #define MB_DEF_BUDGET_MIB 16.0	/* MiB touched per (impl, test)	*/

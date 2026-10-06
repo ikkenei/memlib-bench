@@ -1,0 +1,291 @@
+# glibc benchtests default matrices (benchtests/bench-mem*.c).
+#
+# This file is compiled into the benchmark drivers (see the Makefile) and
+# used when --matrix is not given.  Pass --matrix <your file> to run a
+# different matrix.
+#
+# Block syntax:
+#   case                     start a case block (a bare `loop` starts one too)
+#   loop <var> = <values>    loop variable; A..B = powers of two,
+#                            A..B:STEP = linear, `!pow2` drops powers of two
+#   size  = <expr>           case length
+#   pairs = (a1,a2) ...      offsets (memcpy/memmove/memcmp)
+#   align = <expr>, ...      offset (memset)
+#   fill  = <expr>, ...      fill byte (memset)
+#   diff  = <expr>, ...      expected result (memcmp)
+#   both  = 0|1              copy functions: also run the other direction
+#
+# Expressions may use the loop variables, `P` (the OS page size) and
+# + - * / << with parentheses.
+
+[memcpy]
+
+# powers of two: glibc's 11 alignment templates, both directions
+case
+loop i = 0..17:1
+size = 1 << i
+pairs = (0,0) (i,0) (i+32,0) (0,i) (0,i+32) (i,i) (i+32,i+32) (P/2,0) (P/2+i,0) (P/2,i) (P/2+i,i)
+both = 1
+
+# small sizes, all alignments, single direction
+case
+loop i = 0..31:1
+size = i
+pairs = (0,0) (i,0) (0,i) (i,i) (P/2,0) (P/2+i,0) (P/2,i) (P/2+i,i) (P-1,0) (0,P-1)
+both = 0
+
+# multiples of 16 (powers of two excluded), both directions
+case
+loop i = 3..31:1 !pow2
+size = 16 * i
+pairs = (0,0) (i,0) (0,i) (i,i) (P/2,0) (P/2+i,0) (P/2,i) (P/2+i,i)
+both = 1
+
+# multiples of 32, both directions
+case
+loop i = 32..63:1
+size = 32 * i
+pairs = (0,0) (i,0) (0,i) (i,i) (P/2,0) (P/2+i,0) (P/2,i) (P/2+i,i)
+both = 1
+
+# one page
+case
+size = P
+pairs = (0,0)
+both = 1
+
+# page tail: 2048 + 64*i
+case
+loop i = 0..48:1
+size = 2048 + 64 * i
+pairs = (0,0) (i,0) (i+32,0) (0,i) (0,i+32) (i,i) (i+32,i+32) (P/2,0) (P/2+i,0) (P/2,i) (P/2+i,i) (i,1) (1,i) (i+32,1) (1,i+32) (P/2+i,1) (P/2+1,i)
+both = 1
+
+[memmove]
+
+# powers of two, both overlap directions
+case
+loop i = 0..13:1
+size = 1 << i
+pairs = (0,32) (32,0) (0,i) (i,0)
+
+# small sizes
+case
+loop i = 0..31:1
+size = i
+pairs = (0,32) (32,0) (0,i) (i,0)
+
+# multiples of 16 (powers of two excluded)
+case
+loop i = 3..31:1 !pow2
+size = 16 * i
+pairs = (0,32) (32,0) (0,i) (i,0)
+
+# multiples of 32
+case
+loop i = 32..63:1
+size = 32 * i
+pairs = (0,0) (i,0) (0,i) (i,i)
+
+# page tail: 2048 + 64*i
+case
+loop i = 0..48:1
+size = 2048 + 64 * i
+pairs = (0,0) (i,0) (0,i) (i,i) (P/2,0) (0,P/2) (P/2+i,0) (i,P/2) (P/2,i) (0,P/2+i) (P/2+i,i) (i,P/2+i)
+
+[memset]
+
+# powers of two, alignment 0
+case
+loop c = -65..130:65
+loop i = 0..17:1
+size = 1 << i
+align = 0
+fill = c
+
+# small sizes with the offset equal to the size
+case
+loop c = -65..130:65
+loop i = 0..63:1
+size = i
+align = i
+fill = c
+
+# small sizes, offset 4096 - i
+case
+loop c = -65..130:65
+loop i = 0..63:1
+size = i
+align = 4096 - i
+fill = c
+
+# small sizes, offset 4095
+case
+loop c = -65..130:65
+loop i = 0..63:1
+size = i
+align = 4095
+fill = c
+
+# small sizes, offset 0 (powers of two excluded)
+case
+loop c = -65..130:65
+loop i = 0..63:1 !pow2
+size = i
+align = 0
+fill = c
+
+# multiples of 32 up to 992
+case
+loop c = -65..130:65
+loop i = 32..992:32
+size = i
+align = 0
+fill = c
+
+case
+loop c = -65..130:65
+loop i = 32..992:32
+size = i
+align = i
+fill = c
+
+# a few hand-picked combinations
+case
+loop c = -65..130:65
+size = 14
+align = 1
+fill = c
+
+case
+loop c = -65..130:65
+size = 1024
+align = 3
+fill = c
+
+case
+loop c = -65..130:65
+size = 64
+align = 4
+fill = c
+
+case
+loop c = -65..130:65
+size = 25
+align = 2
+fill = c
+
+# trailing block: 32*i for i = 33..256 step 4 (glibc runs it with the
+# leftover fill value 195)
+case
+loop i = 33..256:4
+size = 32 * i
+align = 0
+fill = 195
+
+case
+loop i = 33..256:4
+size = 32 * i
+align = i
+fill = 195
+
+[memcmp]
+
+# small sizes with both offsets equal to the size
+case
+loop i = 0..31:1
+size = i
+pairs = (i,i)
+diff = 0, 1, -1
+
+# small sizes, aligned and page-tail offsets
+case
+loop i = 0..31:1
+size = i
+pairs = (0,0) (4096-i,0)
+diff = 0, 1, -1
+
+case
+loop i = 33..353:32
+size = i
+pairs = (0,0)
+diff = 0, 1, -1
+
+case
+loop i = 33..353:32
+size = i
+pairs = (i,0)
+diff = 0
+
+case
+loop i = 33..353:32
+size = i
+pairs = (0,i)
+diff = 1
+
+case
+loop i = 33..353:32
+size = i
+pairs = (i,i)
+diff = -1
+
+# powers of two and near-powers, several offsets
+case
+loop i = 1..9:1
+size = 2 << i
+pairs = (0,0)
+diff = 0, 1, -1
+
+case
+loop i = 1..9:1
+size = 16 << i
+pairs = (8-i,2*i)
+diff = 0
+
+case
+loop i = 1..9:1
+size = 16 << i
+pairs = (0,0)
+diff = 0, 1, -1
+
+case
+loop i = 1..9:1
+size = 2 << i
+pairs = (i,0)
+diff = 0
+
+case
+loop i = 1..9:1
+size = 2 << i
+pairs = (0,i)
+diff = 1
+
+case
+loop i = 1..9:1
+size = 2 << i
+pairs = (i,i)
+diff = -1
+
+case
+loop i = 1..9:1
+size = 16 << i
+pairs = (i,0)
+diff = 0
+
+case
+loop i = 1..9:1
+size = 16 << i
+pairs = (0,i)
+diff = 1
+
+case
+loop i = 1..9:1
+size = 16 << i
+pairs = (i,i)
+diff = -1
+
+case
+loop i = 1..9:1
+size = 8 << i
+pairs = (i,2*i)
+diff = 0, 1, -1

@@ -1,21 +1,1377 @@
-/* Matrix file parser (implementation).  See matrix.h. */
+/* Matrix parsing and expansion (implementation).  See matrix.h. */
 
 #include "matrix.h"
 
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_TOKENS (1u << 20)
-#define LINE_MAX 4096
+#define MAX_VALUES (1u << 20)
+#define MAX_CASES  (1u << 22)
+#define MAX_LOOPS  4
+#define LINE_MAX   4096
 
 static char merr[512];
+
+static void
+set_err (const char *fmt, ...)
+{
+  va_list ap;
+  va_start (ap, fmt);
+  vsnprintf (merr, sizeof merr, fmt, ap);
+  va_end (ap);
+}
 
 const char *
 mb_matrix_err (void)
 {
   return merr;
+}
+
+/* ------------------------------------------------------------------ */
+/* Number lists                                                        */
+/* ------------------------------------------------------------------ */
+
+typedef struct
+{
+  long long *v;
+  size_t n, cap;
+} list_t;
+
+static void
+list_free (list_t *l)
+{
+  free (l->v);
+  l->v = NULL;
+  l->n = l->cap = 0;
+}
+
+static int
+list_push (list_t *l, long long x)
+{
+  if (l->n >= MAX_VALUES)
+    return -1;
+  if (l->n == l->cap)
+    {
+      size_t nc = l->cap ? l->cap * 2 : 16;
+      long long *nv = realloc (l->v, nc * sizeof *nv);
+      if (nv == NULL)
+	return -1;
+      l->v = nv;
+      l->cap = nc;
+    }
+  l->v[l->n++] = x;
+  return 0;
+}
+
+static int is_pow2 (long long v)
+{
+  return v >= 0 && (v & (v - 1)) == 0;
+}
+
+/* Append one value token (N, A..B or A..B:STEP) to L.  "*skip_pow2" is set
+   when the literal "!pow2" is seen.  */
+static int
+add_value_token (list_t *l, const char *tok, int line_no, int *skip_pow2)
+{
+  if (strcmp (tok, "!pow2") == 0)
+    {
+      if (skip_pow2 == NULL)
+	{
+	  set_err ("matrix: line %d: !pow2 is only allowed in loop lists",
+		   line_no);
+	  return -1;
+	}
+      *skip_pow2 = 1;
+      return 0;
+    }
+
+  const char *dd = strstr (tok, "..");
+  if (dd == NULL)
+    {
+      char *end = NULL;
+      long long x = strtoll (tok, &end, 0);
+      if (end == tok || *end != '\0')
+	{
+	  set_err ("matrix: line %d: bad number '%s'", line_no, tok);
+	  return -1;
+	}
+      if (list_push (l, x) != 0)
+	{
+	  set_err ("matrix: too many values (limit %u)", MAX_VALUES);
+	  return -1;
+	}
+      return 0;
+    }
+
+  char *end = NULL;
+  long long start = strtoll (tok, &end, 0);
+  if (end != dd)
+    {
+      set_err ("matrix: line %d: bad range '%s'", line_no, tok);
+      return -1;
+    }
+
+  const char *after = dd + 2;
+  long long stop;
+  long long step = 0;			/* 0 => powers of two */
+  const char *colon = strchr (after, ':');
+  if (colon != NULL)
+    {
+      char sbuf[32];
+      size_t n = (size_t) (colon - after);
+      if (n == 0 || n >= sizeof sbuf)
+	{
+	  set_err ("matrix: line %d: bad range '%s'", line_no, tok);
+	  return -1;
+	}
+      memcpy (sbuf, after, n);
+      sbuf[n] = '\0';
+      char *pe = NULL;
+      stop = strtoll (sbuf, &pe, 0);
+      if (pe == sbuf || *pe != '\0')
+	{
+	  set_err ("matrix: line %d: bad range end in '%s'", line_no, tok);
+	  return -1;
+	}
+      char *pe2 = NULL;
+      long long st = strtoll (colon + 1, &pe2, 0);
+      if (pe2 == colon + 1 || *pe2 != '\0' || st <= 0)
+	{
+	  set_err ("matrix: line %d: bad step in '%s' (write A..B:STEP)",
+		   line_no, tok);
+	  return -1;
+	}
+      step = st;
+    }
+  else
+    {
+      char *pe = NULL;
+      stop = strtoll (after, &pe, 0);
+      if (pe == after || *pe != '\0')
+	{
+	  set_err ("matrix: line %d: bad range end in '%s'", line_no, tok);
+	  return -1;
+	}
+    }
+
+  if (stop < start)
+    {
+      set_err ("matrix: line %d: range end < start in '%s'", line_no, tok);
+      return -1;
+    }
+
+  if (step != 0)
+    {
+      for (long long v = start;; v += step)
+	{
+	  if (list_push (l, v) != 0)
+	    {
+	      set_err ("matrix: too many values in '%s'", tok);
+	      return -1;
+	    }
+	  if (v > stop - step)
+	    break;
+	}
+    }
+  else
+    {
+      if (start == 0)
+	{
+	  if (list_push (l, 0) != 0)
+	    return -1;
+	  start = 1;
+	}
+      for (long long v = start;;)
+	{
+	  if (list_push (l, v) != 0)
+	    {
+	      set_err ("matrix: too many values in '%s'", tok);
+	      return -1;
+	    }
+	  if (v > stop / 2)
+	    break;
+	  v *= 2;
+	}
+    }
+  return 0;
+}
+
+/* Filter a loop list in place when !pow2 was requested.  */
+static int
+filter_pow2 (list_t *l)
+{
+  size_t w = 0;
+  for (size_t i = 0; i < l->n; i++)
+    if (!is_pow2 (l->v[i]))
+      l->v[w++] = l->v[i];
+  l->n = w;
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Expressions                                                        */
+/* ------------------------------------------------------------------ */
+
+typedef struct
+{
+  char name[32];
+  list_t vals;
+} loopvar_t;
+
+typedef struct
+{
+  const char *p;			/* cursor			*/
+  const char *expr;			/* whole expression (errors)	*/
+  const loopvar_t *loops;
+  const long long *vals;		/* current loop values		*/
+  int nloops;
+  long long page;
+} eval_t;
+
+static void
+eval_ws (eval_t *e)
+{
+  while (*e->p == ' ' || *e->p == '\t')
+    e->p++;
+}
+
+static int eval_add (eval_t *e, long long *out);
+
+static int
+eval_primary (eval_t *e, long long *out)
+{
+  eval_ws (e);
+  if (*e->p == '(')
+    {
+      e->p++;
+      if (eval_add (e, out) != 0)
+	return -1;
+      eval_ws (e);
+      if (*e->p != ')')
+	{
+	  set_err ("matrix: unbalanced parentheses in '%s'", e->expr);
+	  return -1;
+	}
+      e->p++;
+      return 0;
+    }
+  if (*e->p == '-')
+    {
+      e->p++;
+      if (eval_primary (e, out) != 0)
+	return -1;
+      *out = -*out;
+      return 0;
+    }
+  if (isdigit ((unsigned char) *e->p))
+    {
+      char *end = NULL;
+      long long v = strtoll (e->p, &end, 0);
+      if (end == e->p)
+	{
+	  set_err ("matrix: bad number in '%s'", e->expr);
+	  return -1;
+	}
+      e->p = end;
+      *out = v;
+      return 0;
+    }
+  if (isalpha ((unsigned char) *e->p) || *e->p == '_')
+    {
+      char name[32];
+      size_t n = 0;
+      while ((isalnum ((unsigned char) *e->p) || *e->p == '_')
+	     && n < sizeof name - 1)
+	name[n++] = *e->p++;
+      name[n] = '\0';
+      if (strcmp (name, "P") == 0 || strcmp (name, "page") == 0)
+	{
+	  *out = e->page;
+	  return 0;
+	}
+      for (int i = 0; i < e->nloops; i++)
+	if (strcmp (e->loops[i].name, name) == 0)
+	  {
+	    *out = e->vals[i];
+	    return 0;
+	  }
+      set_err ("matrix: unknown name '%s' in '%s'", name, e->expr);
+      return -1;
+    }
+  set_err ("matrix: unexpected character in '%s'", e->expr);
+  return -1;
+}
+
+static int
+eval_mul (eval_t *e, long long *out)
+{
+  if (eval_primary (e, out) != 0)
+    return -1;
+  for (;;)
+    {
+      eval_ws (e);
+      char op = *e->p;
+      if (op == '*' || op == '/' || op == '<')
+	{
+	  if (op == '<')
+	    {
+	      if (e->p[1] != '<')
+		break;
+	      e->p++;
+	    }
+	  e->p++;
+	  long long rhs;
+	  if (eval_primary (e, &rhs) != 0)
+	    return -1;
+	  if (op == '*')
+	    *out *= rhs;
+	  else if (op == '/')
+	    {
+	      if (rhs == 0)
+		{
+		  set_err ("matrix: division by zero in '%s'", e->expr);
+		  return -1;
+		}
+	      *out /= rhs;
+	    }
+	  else
+	    *out = (rhs >= 0 && rhs < 63) ? (*out << rhs) : 0;
+	}
+      else
+	break;
+    }
+  return 0;
+}
+
+static int
+eval_add (eval_t *e, long long *out)
+{
+  if (eval_mul (e, out) != 0)
+    return -1;
+  for (;;)
+    {
+      eval_ws (e);
+      char op = *e->p;
+      if (op != '+' && op != '-')
+	break;
+      e->p++;
+      long long rhs;
+      if (eval_mul (e, &rhs) != 0)
+	return -1;
+      *out = (op == '+') ? (*out + rhs) : (*out - rhs);
+    }
+  return 0;
+}
+
+static int
+eval_expr (const char *expr, const loopvar_t *loops, const long long *vals,
+	   int nloops, long long page, long long *out)
+{
+  eval_t e;
+  e.p = expr;
+  e.expr = expr;
+  e.loops = loops;
+  e.vals = vals;
+  e.nloops = nloops;
+  e.page = page;
+  if (eval_add (&e, out) != 0)
+    return -1;
+  eval_ws (&e);
+  if (*e.p != '\0')
+    {
+      set_err ("matrix: trailing characters in expression '%s'", expr);
+      return -1;
+    }
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Groups                                                             */
+/* ------------------------------------------------------------------ */
+
+enum
+{ K_NONE = 0, K_SIZES, K_SRC, K_DST, K_ALIGN, K_FILL, K_DIFF, K_BOTH,
+  K_LOOP, K_CASE, K_SIZE, K_PAIRS };
+
+enum
+{ G_NONE = 0, G_FLAT, G_BLOCK };
+
+typedef struct
+{
+  char *e1, *e2;
+} pair_t;
+
+typedef struct
+{
+  int mode;				/* G_*				*/
+  int line_no;
+
+  /* flat lists */
+  list_t sizes, src, dst, align, fill, diff;
+  int both;
+
+  /* block */
+  loopvar_t loops[MAX_LOOPS];
+  int nloops;
+  int last_loop;			/* index used by continuation lines	*/
+  char *size_expr;
+  pair_t *pairs;
+  size_t npairs, cpairs;
+  char **aligns;
+  size_t naligns, caligns;
+  char **fills;
+  size_t nfills, cfills;
+  char **diffs;
+  size_t ndiffs, cdiffs;
+  int block_both;
+} group_t;
+
+static void
+group_reset (group_t *g)
+{
+  list_free (&g->sizes);
+  list_free (&g->src);
+  list_free (&g->dst);
+  list_free (&g->align);
+  list_free (&g->fill);
+  list_free (&g->diff);
+  for (int i = 0; i < g->nloops; i++)
+    list_free (&g->loops[i].vals);
+  for (size_t i = 0; i < g->npairs; i++)
+    {
+      free (g->pairs[i].e1);
+      free (g->pairs[i].e2);
+    }
+  for (size_t i = 0; i < g->naligns; i++)
+    free (g->aligns[i]);
+  for (size_t i = 0; i < g->nfills; i++)
+    free (g->fills[i]);
+  for (size_t i = 0; i < g->ndiffs; i++)
+    free (g->diffs[i]);
+  memset (g, 0, sizeof *g);
+}
+
+static int
+case_add (mb_matrix_t *m, size_t len, long a1, long a2, int c, int result,
+	  int both)
+{
+  if (m->ncases >= MAX_CASES)
+    {
+      set_err ("matrix: too many cases (limit %u)", MAX_CASES);
+      return -1;
+    }
+  if (m->ncases == m->cap)
+    {
+      size_t nc = m->cap ? m->cap * 2 : 256;
+      mb_case_t *nv = realloc (m->cases, nc * sizeof *nv);
+      if (nv == NULL)
+	{
+	  set_err ("matrix: out of memory");
+	  return -1;
+	}
+      m->cases = nv;
+      m->cap = nc;
+    }
+  mb_case_t *k = &m->cases[m->ncases++];
+  k->len = len;
+  k->a1 = a1;
+  k->a2 = a2;
+  k->c = c;
+  k->result = result;
+  k->both = both;
+  return 0;
+}
+
+static int
+str_list_add (char ***arr, size_t *n, size_t *cap, const char *s)
+{
+  if (*n == *cap)
+    {
+      size_t nc = *cap ? *cap * 2 : 8;
+      char **nv = realloc (*arr, nc * sizeof *nv);
+      if (nv == NULL)
+	return -1;
+      *arr = nv;
+      *cap = nc;
+    }
+  char *copy = strdup (s);
+  if (copy == NULL)
+    return -1;
+  (*arr)[(*n)++] = copy;
+  return 0;
+}
+
+static int
+pair_add (group_t *g, const char *e1, const char *e2)
+{
+  if (g->npairs == g->cpairs)
+    {
+      size_t nc = g->cpairs ? g->cpairs * 2 : 8;
+      pair_t *nv = realloc (g->pairs, nc * sizeof *nv);
+      if (nv == NULL)
+	return -1;
+      g->pairs = nv;
+      g->cpairs = nc;
+    }
+  g->pairs[g->npairs].e1 = strdup (e1);
+  g->pairs[g->npairs].e2 = strdup (e2);
+  if (g->pairs[g->npairs].e1 == NULL || g->pairs[g->npairs].e2 == NULL)
+    return -1;
+  g->npairs++;
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Expansion                                                          */
+/* ------------------------------------------------------------------ */
+
+static long long
+page_size (void)
+{
+#ifdef _SC_PAGESIZE
+  long p = sysconf (_SC_PAGESIZE);
+  if (p > 0)
+    return (long long) p;
+#endif
+  return 4096;
+}
+
+static int
+expand_flat (group_t *g, const char *section, mb_matrix_t *m)
+{
+  int line = g->line_no;
+  if (g->sizes.n == 0)
+    {
+      set_err ("matrix: line %d: the [%s] group must define 'sizes'",
+	       line, section);
+      return -1;
+    }
+
+  if (strcmp (section, "memcpy") == 0)
+    {
+      if (g->src.n == 0 || g->dst.n == 0)
+	{
+	  set_err ("matrix: line %d: [memcpy] needs 'src' and 'dst'",
+		   line);
+	  return -1;
+	}
+      for (size_t a = 0; a < g->sizes.n; a++)
+	for (size_t i = 0; i < g->src.n; i++)
+	  for (size_t j = 0; j < g->dst.n; j++)
+	    if (case_add (m, (size_t) g->sizes.v[a], g->src.v[i],
+			  g->dst.v[j], 0, 0, g->both) != 0)
+	      return -1;
+      return 0;
+    }
+
+  if (strcmp (section, "memmove") == 0)
+    {
+      if (g->src.n == 0 && g->dst.n == 0)
+	{
+	  set_err ("matrix: line %d: [memmove] needs a 'src' and/or 'dst' "
+		   "offset list", line);
+	  return -1;
+	}
+      if (g->src.n == g->dst.n)
+	{
+	  int same = 1;
+	  for (size_t i = 0; i < g->src.n; i++)
+	    if (g->src.v[i] != g->dst.v[i])
+	      same = 0;
+	  if (same)
+	    {
+	      /* Same offset list: every unordered pair, both directions.  */
+	      for (size_t a = 0; a < g->sizes.n; a++)
+		for (size_t i = 0; i < g->src.n; i++)
+		  for (size_t j = i + 1; j < g->src.n; j++)
+		    {
+		      if (g->src.v[i] == g->src.v[j])
+			continue;
+		      if (case_add (m, (size_t) g->sizes.v[a], g->src.v[i],
+				    g->src.v[j], 0, 0, 0) != 0
+			  || case_add (m, (size_t) g->sizes.v[a],
+				       g->src.v[j], g->src.v[i], 0, 0,
+				       0) != 0)
+			return -1;
+		    }
+	      return 0;
+	    }
+	}
+      for (size_t a = 0; a < g->sizes.n; a++)
+	for (size_t i = 0; i < g->src.n; i++)
+	  for (size_t j = 0; j < g->dst.n; j++)
+	    {
+	      if (g->src.v[i] == g->dst.v[j])
+		continue;
+	      if (case_add (m, (size_t) g->sizes.v[a], g->src.v[i],
+			    g->dst.v[j], 0, 0, 0) != 0)
+		return -1;
+	      if (g->both
+		  && case_add (m, (size_t) g->sizes.v[a], g->dst.v[j],
+			       g->src.v[i], 0, 0, 0) != 0)
+		return -1;
+	    }
+      return 0;
+    }
+
+  if (strcmp (section, "memset") == 0)
+    {
+      if (g->align.n == 0 || g->fill.n == 0)
+	{
+	  set_err ("matrix: line %d: [memset] needs 'align' and 'fill'",
+		   line);
+	  return -1;
+	}
+      for (size_t a = 0; a < g->sizes.n; a++)
+	for (size_t i = 0; i < g->align.n; i++)
+	  for (size_t j = 0; j < g->fill.n; j++)
+	    if (case_add (m, (size_t) g->sizes.v[a], g->align.v[i], 0,
+			  (int) g->fill.v[j], 0, 0) != 0)
+	      return -1;
+      return 0;
+    }
+
+  if (strcmp (section, "memcmp") == 0)
+    {
+      if (g->src.n == 0 || g->dst.n == 0 || g->diff.n == 0)
+	{
+	  set_err ("matrix: line %d: [memcmp] needs 'src', 'dst' and "
+		   "'diff'", line);
+	  return -1;
+	}
+      for (size_t a = 0; a < g->sizes.n; a++)
+	for (size_t i = 0; i < g->src.n; i++)
+	  for (size_t j = 0; j < g->dst.n; j++)
+	    for (size_t r = 0; r < g->diff.n; r++)
+	      if (case_add (m, (size_t) g->sizes.v[a], g->src.v[i],
+			    g->dst.v[j], 0, (int) g->diff.v[r], 0) != 0)
+		return -1;
+      return 0;
+    }
+
+  set_err ("matrix: unknown function section '[%s]'", section);
+  return -1;
+}
+
+static int
+expand_block (group_t *g, const char *section, mb_matrix_t *m)
+{
+  long long page = page_size ();
+  int line = g->line_no;
+  long long vals[MAX_LOOPS] = { 0, 0, 0, 0 };
+
+  if (g->size_expr == NULL)
+    {
+      set_err ("matrix: line %d: the [%s] case block has no 'size'",
+	       line, section);
+      return -1;
+    }
+  int is_memset = strcmp (section, "memset") == 0;
+  int is_memcmp = strcmp (section, "memcmp") == 0;
+  int is_memcpy = strcmp (section, "memcpy") == 0;
+  int is_memmove = strcmp (section, "memmove") == 0;
+  if (!is_memset && !is_memcmp && !is_memcpy && !is_memmove)
+    {
+      set_err ("matrix: unknown function section '[%s]'", section);
+      return -1;
+    }
+  if (!is_memset && g->npairs == 0)
+    {
+      set_err ("matrix: line %d: the [%s] case block has no 'pairs'",
+	       line, section);
+      return -1;
+    }
+  if (is_memset && (g->naligns == 0 || g->nfills == 0))
+    {
+      set_err ("matrix: line %d: the [memset] case block needs 'align' "
+	       "and 'fill'", line);
+      return -1;
+    }
+  if (is_memcmp && g->ndiffs == 0)
+    {
+      set_err ("matrix: line %d: the [memcmp] case block needs 'diff'",
+	       line);
+      return -1;
+    }
+
+  /* Odometer over the loop variables (no loops => one iteration).  */
+  size_t idx[MAX_LOOPS] = { 0, 0, 0, 0 };
+  for (int i = 0; i < g->nloops; i++)
+    vals[i] = g->loops[i].vals.v[0];
+  for (;;)
+    {
+      long long len;
+      if (eval_expr (g->size_expr, g->loops, vals, g->nloops, page,
+		     &len) != 0)
+	return -1;
+
+      if (is_memset)
+	{
+	  for (size_t a = 0; a < g->naligns; a++)
+	    {
+	      long long al;
+	      if (eval_expr (g->aligns[a], g->loops, vals, g->nloops, page,
+			     &al) != 0)
+		return -1;
+	      for (size_t f = 0; f < g->nfills; f++)
+		{
+		  long long c;
+		  if (eval_expr (g->fills[f], g->loops, vals, g->nloops,
+				 page, &c) != 0)
+		    return -1;
+		  if (case_add (m, (size_t) len, al, 0, (int) c, 0, 0) != 0)
+		    return -1;
+		}
+	    }
+	}
+      else
+	{
+	  for (size_t p = 0; p < g->npairs; p++)
+	    {
+	      long long a1, a2;
+	      if (eval_expr (g->pairs[p].e1, g->loops, vals, g->nloops,
+			     page, &a1) != 0
+		  || eval_expr (g->pairs[p].e2, g->loops, vals, g->nloops,
+				page, &a2) != 0)
+		return -1;
+	      if (is_memcmp)
+		{
+		  for (size_t r = 0; r < g->ndiffs; r++)
+		    {
+		      long long res;
+		      if (eval_expr (g->diffs[r], g->loops, vals, g->nloops,
+				     page, &res) != 0)
+			return -1;
+		      if (case_add (m, (size_t) len, a1, a2, 0, (int) res,
+				    0) != 0)
+			return -1;
+		    }
+		}
+	      else if (case_add (m, (size_t) len, a1, a2, 0, 0,
+				 is_memcpy ? g->block_both : 0) != 0)
+		return -1;
+	    }
+	}
+
+      /* Next loop combination (odometer).  */
+      int i = g->nloops - 1;
+      while (i >= 0 && ++idx[i] >= g->loops[i].vals.n)
+	{
+	  idx[i] = 0;
+	  vals[i] = g->loops[i].vals.v[0];
+	  i--;
+	}
+      if (i < 0)
+	break;
+      vals[i] = g->loops[i].vals.v[idx[i]];
+    }
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Line-level parsing                                                 */
+/* ------------------------------------------------------------------ */
+
+static int
+key_of (const char *key)
+{
+  if (!strcmp (key, "sizes") || !strcmp (key, "size")
+      || !strcmp (key, "lengths") || !strcmp (key, "length"))
+    return K_SIZES;
+  if (!strcmp (key, "src") || !strcmp (key, "align1") || !strcmp (key, "s"))
+    return K_SRC;
+  if (!strcmp (key, "dst") || !strcmp (key, "align2") || !strcmp (key, "d"))
+    return K_DST;
+  if (!strcmp (key, "align") || !strcmp (key, "alignment")
+      || !strcmp (key, "a"))
+    return K_ALIGN;
+  if (!strcmp (key, "fill") || !strcmp (key, "c") || !strcmp (key, "char"))
+    return K_FILL;
+  if (!strcmp (key, "diff") || !strcmp (key, "result"))
+    return K_DIFF;
+  if (!strcmp (key, "both"))
+    return K_BOTH;
+  if (!strcmp (key, "loop"))
+    return K_LOOP;
+  if (!strcmp (key, "case") || !strcmp (key, "block"))
+    return K_CASE;
+  if (!strcmp (key, "pairs"))
+    return K_PAIRS;
+  return K_NONE;
+}
+
+static void
+rtrim (char *s)
+{
+  size_t n = strlen (s);
+  while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t'
+		   || s[n - 1] == '\n' || s[n - 1] == '\r'))
+    s[--n] = '\0';
+}
+
+static const char *
+skip_ws (const char *p)
+{
+  while (*p == ' ' || *p == '\t')
+    p++;
+  return p;
+}
+
+/* Parse "(e1,e2) (e3,e4) ..." and append to G.  */
+static int
+parse_pairs (group_t *g, const char *p, int line_no)
+{
+  for (;;)
+    {
+      p = skip_ws (p);
+      while (*p == ',')
+	p = skip_ws (p + 1);
+      if (*p == '\0')
+	return 0;
+      if (*p != '(')
+	{
+	  set_err ("matrix: line %d: expected '(' in pairs list", line_no);
+	  return -1;
+	}
+      p++;
+      char e1[256], e2[256];
+      size_t n1 = 0, n2 = 0;
+      int second = 0;
+      while (*p != '\0' && *p != ')')
+	{
+	  if (*p == ',' && !second)
+	    {
+	      second = 1;
+	      p++;
+	      continue;
+	    }
+	  char *dst = second ? e2 : e1;
+	  size_t *n = second ? &n2 : &n1;
+	  if (*n < sizeof e1 - 1)
+	    dst[(*n)++] = *p;
+	  p++;
+	}
+      if (*p != ')')
+	{
+	  set_err ("matrix: line %d: unterminated pair in pairs list",
+		   line_no);
+	  return -1;
+	}
+      p++;
+      e1[n1] = '\0';
+      e2[n2] = '\0';
+      rtrim (e1);
+      rtrim (e2);
+      if (n1 == 0 || !second)
+	{
+	  set_err ("matrix: line %d: bad pair '(%.*s)'", line_no,
+		   (int) (p - g->size_expr), e1);
+	  return -1;
+	}
+      if (pair_add (g, e1, e2) != 0)
+	{
+	  set_err ("matrix: out of memory");
+	  return -1;
+	}
+    }
+}
+
+/* Append the value text of key K (in group G) to the group.  */
+static int
+append_key_values (group_t *g, int k, const char *val, int line_no)
+{
+  if (k == K_PAIRS)
+    return parse_pairs (g, val, line_no);
+
+  if (k == K_BOTH)
+    {
+      char *end = NULL;
+      long long x = strtoll (skip_ws (val), &end, 0);
+      if (end == val || (x != 0 && x != 1))
+	{
+	  set_err ("matrix: line %d: 'both' must be 0 or 1", line_no);
+	  return -1;
+	}
+      if (g->mode == G_BLOCK)
+	g->block_both = (int) x;
+      else
+	g->both = (int) x;
+      return 0;
+    }
+
+  if (k == K_SIZE)
+    {
+      free (g->size_expr);
+      g->size_expr = strdup (skip_ws (val));
+      if (g->size_expr == NULL)
+	return -1;
+      return 0;
+    }
+
+  /* Expression lists in blocks are comma separated (so that expressions
+     may contain spaces); flat lists accept spaces and commas.  */
+  if (g->mode == G_BLOCK
+      && (k == K_ALIGN || k == K_FILL || k == K_DIFF))
+    {
+      char *copy = strdup (val);
+      if (copy == NULL)
+	return -1;
+      char *tok = strtok (copy, ",");
+      while (tok != NULL)
+	{
+	  while (*tok == ' ' || *tok == '\t')
+	    tok++;
+	  rtrim (tok);
+	  if (*tok != '\0')
+	    {
+	      char ***arr;
+	      size_t *n, *cap;
+	      if (k == K_ALIGN)
+		{ arr = &g->aligns; n = &g->naligns; cap = &g->caligns; }
+	      else if (k == K_FILL)
+		{ arr = &g->fills; n = &g->nfills; cap = &g->cfills; }
+	      else
+		{ arr = &g->diffs; n = &g->ndiffs; cap = &g->cdiffs; }
+	      if (str_list_add (arr, n, cap, tok) != 0)
+		{
+		  free (copy);
+		  set_err ("matrix: out of memory");
+		  return -1;
+		}
+	    }
+	  tok = strtok (NULL, ",");
+	}
+      free (copy);
+      return 0;
+    }
+
+  list_t *l = NULL;
+  switch (k)
+    {
+    case K_SIZES: l = &g->sizes; break;
+    case K_SRC:   l = &g->src; break;
+    case K_DST:   l = &g->dst; break;
+    case K_ALIGN: l = &g->align; break;
+    case K_FILL:  l = &g->fill; break;
+    case K_DIFF:  l = &g->diff; break;
+    default:
+      set_err ("matrix: line %d: unexpected key", line_no);
+      return -1;
+    }
+
+  char *copy = strdup (val);
+  if (copy == NULL)
+    return -1;
+  char *tok = strtok (copy, " \t,");
+  while (tok != NULL)
+    {
+      if (add_value_token (l, tok, line_no, NULL) != 0)
+	{
+	  free (copy);
+	  return -1;
+	}
+      tok = strtok (NULL, " \t,");
+    }
+  free (copy);
+  return 0;
+}
+
+/* "loop <var> = <values>" */
+static int
+parse_loop (group_t *g, const char *val, int line_no)
+{
+  if (g->mode != G_BLOCK)
+    {
+      set_err ("matrix: line %d: 'loop' outside a case block", line_no);
+      return -1;
+    }
+  if (g->nloops >= MAX_LOOPS)
+    {
+      set_err ("matrix: line %d: at most %d loop variables per block",
+	       line_no, MAX_LOOPS);
+      return -1;
+    }
+  const char *p = skip_ws (val);
+  char name[32];
+  size_t n = 0;
+  while (*p != '\0' && *p != '=' && !isspace ((unsigned char) *p)
+	 && n < sizeof name - 1)
+    name[n++] = *p++;
+  name[n] = '\0';
+  p = skip_ws (p);
+  if (*p != '=')
+    {
+      set_err ("matrix: line %d: expected 'loop <var> = <values>'",
+	       line_no);
+      return -1;
+    }
+  p++;
+  if (n == 0)
+    {
+      set_err ("matrix: line %d: missing loop variable name", line_no);
+      return -1;
+    }
+
+  loopvar_t *lv = &g->loops[g->nloops];
+  memset (lv, 0, sizeof *lv);
+  snprintf (lv->name, sizeof lv->name, "%s", name);
+
+  int skip_pow2 = 0;
+  char *copy = strdup (p);
+  if (copy == NULL)
+    return -1;
+  char *tok = strtok (copy, " \t,");
+  while (tok != NULL)
+    {
+      if (add_value_token (&lv->vals, tok, line_no, &skip_pow2) != 0)
+	{
+	  free (copy);
+	  return -1;
+	}
+      tok = strtok (NULL, " \t,");
+    }
+  free (copy);
+  if (skip_pow2)
+    filter_pow2 (&lv->vals);
+  if (lv->vals.n == 0)
+    {
+      set_err ("matrix: line %d: empty loop list", line_no);
+      return -1;
+    }
+  g->last_loop = g->nloops;
+  g->nloops++;
+  return 0;
+}
+
+/* Append more values to the most recent loop variable (continuation).  */
+static int
+loop_append (group_t *g, const char *val, int line_no)
+{
+  if (g->nloops == 0 || g->last_loop >= g->nloops)
+    {
+      set_err ("matrix: line %d: continuation of an unknown loop",
+	       line_no);
+      return -1;
+    }
+  loopvar_t *lv = &g->loops[g->last_loop];
+  int skip_pow2 = 0;
+  char *copy = strdup (val);
+  if (copy == NULL)
+    return -1;
+  char *tok = strtok (copy, " \t,");
+  while (tok != NULL)
+    {
+      if (add_value_token (&lv->vals, tok, line_no, &skip_pow2) != 0)
+	{
+	  free (copy);
+	  return -1;
+	}
+      tok = strtok (NULL, " \t,");
+    }
+  free (copy);
+  if (skip_pow2)
+    filter_pow2 (&lv->vals);
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Top level                                                          */
+/* ------------------------------------------------------------------ */
+
+int
+mb_matrix_parse (const char *text, const char *section, mb_matrix_t *m)
+{
+  group_t g;
+  memset (&g, 0, sizeof g);
+
+  int active = 0, saw_section = 0, line_no = 0;
+  int last_key = K_NONE;
+  int rc = -1;
+
+  const char *p = text;
+  char line[LINE_MAX];
+
+  while (*p != '\0')
+    {
+      /* Copy one line.  */
+      size_t n = 0;
+      while (*p != '\0' && *p != '\n' && n < sizeof line - 1)
+	line[n++] = *p++;
+      if (*p == '\n')
+	p++;
+      line[n] = '\0';
+      line_no++;
+      rtrim (line);
+
+      char *s = line;
+      s = (char *) skip_ws (s);
+      if (*s == '\0' || *s == '#' || *s == ';')
+	continue;
+
+      if (*s == '[')
+	{
+	  char *end = strchr (s, ']');
+	  if (end == NULL)
+	    {
+	      set_err ("matrix: line %d: unterminated section header",
+		       line_no);
+	      goto out;
+	    }
+	  *end = '\0';
+	  char *name = (char *) skip_ws (s + 1);
+	  rtrim (name);
+	  if (active && g.mode != G_NONE)
+	    {
+	      int bad = (g.mode == G_FLAT)
+		? expand_flat (&g, section, m)
+		: expand_block (&g, section, m);
+	      group_reset (&g);
+	      if (bad != 0)
+		goto out;
+	    }
+	  active = strcmp (name, section) == 0;
+	  if (active)
+	    saw_section = 1;
+	  last_key = K_NONE;
+	  continue;
+	}
+
+      if (!active)
+	continue;
+
+      /* `loop <var> = <values>`: the '=' belongs to the loop, not to a
+         key, so it is handled before the generic key/value split.  */
+      if (strncmp (s, "loop", 4) == 0 && (s[4] == ' ' || s[4] == '\t'))
+	{
+	  if (g.mode != G_BLOCK)
+	    {
+	      if (g.mode == G_FLAT)
+		{
+		  int bad = expand_flat (&g, section, m);
+		  group_reset (&g);
+		  if (bad != 0)
+		    goto out;
+		}
+	      g.mode = G_BLOCK;
+	      g.line_no = line_no;
+	      g.block_both = 1;
+	    }
+	  if (parse_loop (&g, s + 4, line_no) != 0)
+	    goto out;
+	  last_key = K_LOOP;
+	  continue;
+	}
+
+      char *eq = strchr (s, '=');
+      int k;
+      char *val = NULL;
+
+      if (eq != NULL)
+	{
+	  *eq = '\0';
+	  char *key = s;
+	  rtrim (key);
+	  val = eq + 1;
+
+	  k = key_of (key);
+	  if (k == K_NONE)
+	    {
+	      set_err ("matrix: line %d: unknown key '%s'", line_no, key);
+	      goto out;
+	    }
+	  /* In a case block "size" is the length expression, not the flat
+	     "sizes" list.  */
+	  if (k == K_SIZES && strcmp (key, "size") == 0
+	      && g.mode != G_FLAT)
+	    k = K_SIZE;
+
+	  /* Start a new group when needed.  */
+	  int start_block = (k == K_LOOP || k == K_CASE);
+	  int start_flat = (k == K_SIZES && g.mode != G_FLAT);
+	  if (k == K_CASE)
+	    {
+	      if (g.mode != G_NONE)
+		{
+		  int bad = (g.mode == G_FLAT)
+		    ? expand_flat (&g, section, m)
+		    : expand_block (&g, section, m);
+		  group_reset (&g);
+		  if (bad != 0)
+		    goto out;
+		}
+	      g.mode = G_BLOCK;
+	      g.line_no = line_no;
+	      g.block_both = 1;
+	      last_key = K_NONE;
+	      continue;
+	    }
+	  if (start_block || start_flat || g.mode == G_NONE)
+	    {
+	      if (g.mode != G_NONE)
+		{
+		  int bad = (g.mode == G_FLAT)
+		    ? expand_flat (&g, section, m)
+		    : expand_block (&g, section, m);
+		  group_reset (&g);
+		  if (bad != 0)
+		    goto out;
+		}
+	      g.mode = start_block ? G_BLOCK : G_FLAT;
+	      g.line_no = line_no;
+	      if (g.mode == G_FLAT)
+		g.both = 1;
+	      else
+		g.block_both = 1;
+	    }
+	}
+      else if (strcmp (s, "case") == 0 || strcmp (s, "block") == 0)
+	{
+	  /* A bare `case` starts a new case block.  */
+	  if (g.mode != G_NONE)
+	    {
+	      int bad = (g.mode == G_FLAT)
+		? expand_flat (&g, section, m)
+		: expand_block (&g, section, m);
+	      group_reset (&g);
+	      if (bad != 0)
+		goto out;
+	    }
+	  g.mode = G_BLOCK;
+	  g.line_no = line_no;
+	  g.block_both = 1;
+	  last_key = K_NONE;
+	  continue;
+	}
+      else
+	{
+	  /* Continuation line: append to the previous key.  A line that
+	     starts with a known key name usually means the '=' was
+	     forgotten, which deserves its own message.  */
+	  char first[64];
+	  size_t fn = 0;
+	  const char *q = s;
+	  while (*q != '\0' && *q != ' ' && *q != '\t' && *q != ','
+		 && fn < sizeof first - 1)
+	    first[fn++] = *q++;
+	  first[fn] = '\0';
+	  if (key_of (first) != K_NONE)
+	    {
+	      set_err ("matrix: line %d: missing '=' after '%s' "
+		       "(write '%s = ...')", line_no, first, first);
+	      goto out;
+	    }
+	  if (last_key == K_NONE || last_key == K_CASE || last_key == K_SIZE)
+	    {
+	      set_err ("matrix: line %d: expected 'key = value'", line_no);
+	      goto out;
+	    }
+	  k = last_key;
+	  val = s;
+	}
+
+      /* Trailing comments are allowed after a value ("... # note").  */
+      if (val != NULL)
+	{
+	  char *hash = strchr (val, '#');
+	  if (hash != NULL)
+	    *hash = '\0';
+	}
+
+      if (k == K_LOOP)
+	{
+	  if (loop_append (&g, val, line_no) != 0)
+	    goto out;
+	}
+      else if (k == K_CASE)
+	{
+	  /* handled above */
+	}
+      else if (append_key_values (&g, k, val, line_no) != 0)
+	goto out;
+
+      last_key = k;
+    }
+
+  if (!saw_section)
+    {
+      set_err ("matrix: no [%s] section", section);
+      goto out;
+    }
+  if (g.mode != G_NONE)
+    {
+      int bad = (g.mode == G_FLAT) ? expand_flat (&g, section, m)
+				   : expand_block (&g, section, m);
+      if (bad != 0)
+	goto out;
+    }
+  if (m->ncases == 0)
+    {
+      set_err ("matrix: [%s] produced no cases", section);
+      goto out;
+    }
+  rc = 0;
+
+out:
+  group_reset (&g);
+  return rc;
+}
+
+int
+mb_matrix_load (const char *path, const char *section, mb_matrix_t *m)
+{
+  FILE *fp = fopen (path, "r");
+  if (fp == NULL)
+    {
+      set_err ("matrix: cannot open '%s'", path);
+      return -1;
+    }
+  size_t cap = 8192, n = 0;
+  char *buf = malloc (cap);
+  if (buf == NULL)
+    {
+      fclose (fp);
+      set_err ("matrix: out of memory");
+      return -1;
+    }
+  for (;;)
+    {
+      if (n == cap)
+	{
+	  cap *= 2;
+	  char *nb = realloc (buf, cap);
+	  if (nb == NULL)
+	    {
+	      free (buf);
+	      fclose (fp);
+	      set_err ("matrix: out of memory");
+	      return -1;
+	    }
+	  buf = nb;
+	}
+      size_t got = fread (buf + n, 1, cap - n, fp);
+      n += got;
+      if (got == 0)
+	break;
+    }
+  fclose (fp);
+  if (n == cap)
+    {
+      char *nb = realloc (buf, cap + 1);
+      if (nb == NULL)
+	{
+	  free (buf);
+	  set_err ("matrix: out of memory");
+	  return -1;
+	}
+      buf = nb;
+    }
+  buf[n] = '\0';
+  int rc = mb_matrix_parse (buf, section, m);
+  free (buf);
+  return rc;
 }
 
 void
@@ -27,443 +1383,16 @@ mb_matrix_init (mb_matrix_t *m)
 void
 mb_matrix_free (mb_matrix_t *m)
 {
-  free (m->sizes);
-  free (m->src);
-  free (m->dst);
-  free (m->align);
-  free (m->fill);
-  free (m->diff);
+  free (m->cases);
   memset (m, 0, sizeof *m);
 }
 
 long long
-mb_matrix_max_size (const mb_matrix_t *m)
+mb_matrix_max_len (const mb_matrix_t *m)
 {
   long long mx = 0;
-  for (size_t i = 0; i < m->nsizes; i++)
-    if (m->sizes[i] > mx)
-      mx = m->sizes[i];
+  for (size_t i = 0; i < m->ncases; i++)
+    if ((long long) m->cases[i].len > mx)
+      mx = (long long) m->cases[i].len;
   return mx;
-}
-
-/* ------------------------------------------------------------------ */
-/* Growable long long list                                            */
-/* ------------------------------------------------------------------ */
-
-typedef struct
-{
-  long long *v;
-  size_t n, cap;
-  int overflow;
-} list_t;
-
-static int
-list_push (list_t *l, long long x)
-{
-  if (l->overflow)
-    return -1;
-  if (l->n >= MAX_TOKENS)
-    {
-      l->overflow = 1;
-      return -1;
-    }
-  if (l->n == l->cap)
-    {
-      size_t nc = l->cap ? l->cap * 2 : 16;
-      long long *nv = realloc (l->v, nc * sizeof *nv);
-      if (nv == NULL)
-	{
-	  l->overflow = 1;
-	  return -1;
-	}
-      l->v = nv;
-      l->cap = nc;
-    }
-  l->v[l->n++] = x;
-  return 0;
-}
-
-/* ------------------------------------------------------------------ */
-/* Token parsing                                                      */
-/* ------------------------------------------------------------------ */
-
-/* Which list does a key update?  */
-enum key_kind
-{
-  K_SIZES, K_SRC, K_DST, K_ALIGN, K_FILL, K_DIFF, K_BOTH, K_UNKNOWN
-};
-
-static enum key_kind
-key_kind_of (const char *key)
-{
-  if (!strcmp (key, "sizes") || !strcmp (key, "size")
-      || !strcmp (key, "lengths") || !strcmp (key, "length"))
-    return K_SIZES;
-  if (!strcmp (key, "src") || !strcmp (key, "align1")
-      || !strcmp (key, "s"))
-    return K_SRC;
-  if (!strcmp (key, "dst") || !strcmp (key, "align2")
-      || !strcmp (key, "d"))
-    return K_DST;
-  if (!strcmp (key, "align") || !strcmp (key, "alignment")
-      || !strcmp (key, "a"))
-    return K_ALIGN;
-  if (!strcmp (key, "fill") || !strcmp (key, "c")
-      || !strcmp (key, "char"))
-    return K_FILL;
-  if (!strcmp (key, "diff") || !strcmp (key, "result"))
-    return K_DIFF;
-  if (!strcmp (key, "both"))
-    return K_BOTH;
-  return K_UNKNOWN;
-}
-
-/* Add one number token to the proper list; unsigned keys reject
-   negative values.  */
-static int
-add_token (enum key_kind k, list_t *l, const char *tok, int line_no,
-	   long long *both)
-{
-  char *end = NULL;
-  long long x = strtoll (tok, &end, 0);
-  if (end == tok || *end != '\0')
-    {
-      snprintf (merr, sizeof merr, "matrix: line %d: bad number '%s'",
-		line_no, tok);
-      return -1;
-    }
-  if (k == K_BOTH)
-    {
-      if (x != 0 && x != 1)
-	{
-	  snprintf (merr, sizeof merr,
-		    "matrix: line %d: 'both' must be 0 or 1", line_no);
-	  return -1;
-	}
-      *both = (int) x;
-      return 0;
-    }
-  if ((k == K_SIZES || k == K_SRC || k == K_DST || k == K_ALIGN)
-      && x < 0)
-    {
-      snprintf (merr, sizeof merr,
-		"matrix: line %d: sizes/offsets must be >= 0 (got %s)",
-		line_no, tok);
-      return -1;
-    }
-  if (k == K_DIFF && (x < -1 || x > 1))
-    {
-      snprintf (merr, sizeof merr,
-		"matrix: line %d: 'diff' must be in {-1,0,1} (got %s)",
-		line_no, tok);
-      return -1;
-    }
-  if (list_push (l, x) != 0)
-    {
-      snprintf (merr, sizeof merr,
-		"matrix: too many values (limit %u per key)", MAX_TOKENS);
-      return -1;
-    }
-  return 0;
-}
-
-/* Expand one token which may be a range "A..B" (powers of two) or
-   "A..B:STEP" (linear).  Plain numbers are passed through.  */
-static int
-add_range_or_value (enum key_kind k, list_t *l, const char *tok,
-		    int line_no, long long *both)
-{
-  const char *dd = strstr (tok, "..");
-  if (dd == NULL)
-    return add_token (k, l, tok, line_no, both);
-  if (k == K_FILL || k == K_DIFF)
-    {
-      snprintf (merr, sizeof merr,
-		"matrix: line %d: ranges are not allowed for this key "
-		"('%s')", line_no, tok);
-      return -1;
-    }
-
-  char *end = NULL;
-  long long start = strtoll (tok, &end, 0);
-  if (end != dd || start < 0)
-    {
-      snprintf (merr, sizeof merr, "matrix: line %d: bad range '%s'",
-		line_no, tok);
-      return -1;
-    }
-
-  const char *after = dd + 2;
-  long long step = 0;		/* 0 => powers of two		*/
-  long long stop;
-  const char *colon = strchr (after, ':');
-  if (colon != NULL)
-    {
-      /* A..B:STEP - stop is before the colon, step after it.  */
-      char sbuf[32];
-      size_t n = (size_t) (colon - after);
-      if (n == 0 || n >= sizeof sbuf)
-	{
-	  snprintf (merr, sizeof merr,
-		    "matrix: line %d: bad range '%s'", line_no, tok);
-	  return -1;
-	}
-      memcpy (sbuf, after, n);
-      sbuf[n] = '\0';
-      char *pe = NULL;
-      stop = strtoll (sbuf, &pe, 0);
-      if (pe == sbuf || *pe != '\0')
-	{
-	  snprintf (merr, sizeof merr,
-		    "matrix: line %d: bad range end in '%s'", line_no, tok);
-	  return -1;
-	}
-      char *pe2 = NULL;
-      long long st = strtoll (colon + 1, &pe2, 0);
-      if (pe2 == colon + 1 || *pe2 != '\0' || st <= 0)
-	{
-	  snprintf (merr, sizeof merr,
-		    "matrix: line %d: bad step in range '%s' "
-		    "(write A..B:STEP)", line_no, tok);
-	  return -1;
-	}
-      step = st;
-    }
-  else
-    {
-      char *pe = NULL;
-      stop = strtoll (after, &pe, 0);
-      if (pe == after || *pe != '\0')
-	{
-	  snprintf (merr, sizeof merr,
-		    "matrix: line %d: bad range end in '%s'", line_no, tok);
-	  return -1;
-	}
-    }
-
-  if (stop < start)
-    {
-      snprintf (merr, sizeof merr,
-		"matrix: line %d: range end < start in '%s'", line_no, tok);
-      return -1;
-    }
-
-  if (step != 0)
-    {
-      for (long long v = start;; v += step)
-	{
-	  if (list_push (l, v) != 0)
-	    {
-	      snprintf (merr, sizeof merr,
-			"matrix: line %d: too many values in range '%s'",
-			line_no, tok);
-	      return -1;
-	    }
-	  if (v > stop - step)
-	    break;
-	}
-    }
-  else
-    {
-      /* Powers of two.  */
-      for (long long v = start;;)
-	{
-	  if (list_push (l, v) != 0)
-	    {
-	      snprintf (merr, sizeof merr,
-			"matrix: line %d: too many values in range '%s'",
-			line_no, tok);
-	      return -1;
-	    }
-	  if (v > stop / 2)
-	    break;
-	  v *= 2;
-	}
-    }
-  return 0;
-}
-
-/* ------------------------------------------------------------------ */
-/* File parsing                                                       */
-/* ------------------------------------------------------------------ */
-
-int
-mb_matrix_load (const char *path, const char *section, mb_matrix_t *m)
-{
-  FILE *fp = fopen (path, "r");
-  if (fp == NULL)
-    {
-      snprintf (merr, sizeof merr, "matrix: cannot open '%s'", path);
-      return -1;
-    }
-
-  list_t lists[6];
-  memset (lists, 0, sizeof lists);
-  long long both = 1;
-  char line[LINE_MAX];
-  int active = 0;
-  int saw_section = 0;
-  int line_no = 0;
-  int rc = -1;
-  enum key_kind curk = K_UNKNOWN;	/* key of the current value list */
-  list_t *curl = NULL;		/* list the current key appends to   */
-
-  while (fgets (line, sizeof line, fp) != NULL)
-    {
-      line_no++;
-
-      /* Trim trailing newline / whitespace.  */
-      size_t ll = strlen (line);
-      while (ll > 0 && (line[ll - 1] == '\n' || line[ll - 1] == '\r'
-			|| line[ll - 1] == ' ' || line[ll - 1] == '\t'))
-	line[--ll] = '\0';
-
-      char *p = line;
-
-      /* Trim leading whitespace.  */
-      while (*p == ' ' || *p == '\t')
-	p++;
-
-      /* Comments and blank lines.  */
-      if (*p == '\0' || *p == '#' || *p == ';')
-	continue;
-
-      if (*p == '[')
-	{
-	  char *end = strchr (p, ']');
-	  if (end == NULL)
-	    {
-	      snprintf (merr, sizeof merr,
-			"matrix: line %d: unterminated section header",
-			line_no);
-	      goto out;
-	    }
-	  *end = '\0';
-	  char *name = p + 1;
-	  while (*name == ' ' || *name == '\t')
-	    name++;
-	  active = strcmp (name, section) == 0;
-	  if (active)
-	    saw_section = 1;
-	  curk = K_UNKNOWN;
-	  curl = NULL;
-	  continue;
-	}
-
-      if (!active)
-	continue;
-
-      char *eq = strchr (p, '=');
-      enum key_kind k;
-      list_t *dst_list = NULL;
-      if (eq != NULL)
-	{
-	  /* key = value...  */
-	  *eq = '\0';
-	  char *key = p;
-	  char *ke = key + strlen (key);
-	  while (ke > key && (ke[-1] == ' ' || ke[-1] == '\t'))
-	    *--ke = '\0';
-
-	  k = key_kind_of (key);
-	  if (k == K_UNKNOWN)
-	    {
-	      snprintf (merr, sizeof merr,
-			"matrix: line %d: unknown key '%s'", line_no, key);
-	      goto out;
-	    }
-	  switch (k)
-	    {
-	    case K_SIZES: dst_list = &lists[0]; break;
-	    case K_SRC:   dst_list = &lists[1]; break;
-	    case K_DST:   dst_list = &lists[2]; break;
-	    case K_ALIGN: dst_list = &lists[3]; break;
-	    case K_FILL:  dst_list = &lists[4]; break;
-	    case K_DIFF:  dst_list = &lists[5]; break;
-	    default: break;
-	    }
-	  curk = k;
-	  curl = dst_list;
-	  p = eq + 1;
-	}
-      else
-	{
-	  /* Continuation line: append to the value list of the previous
-	     key (allows long lists to be wrapped over several lines).  A
-	     line that starts with a known key name usually means the '='
-	     was forgotten, which is worth its own message.  */
-	  char first[64];
-	  size_t fn = 0;
-	  while (p[fn] != '\0' && p[fn] != ' ' && p[fn] != '\t'
-		 && p[fn] != ',' && fn < sizeof first - 1)
-	    {
-	      first[fn] = p[fn];
-	      fn++;
-	    }
-	  first[fn] = '\0';
-	  if (key_kind_of (first) != K_UNKNOWN)
-	    {
-	      snprintf (merr, sizeof merr,
-			"matrix: line %d: missing '=' after '%s' "
-			"(write '%s = ...')", line_no, first, first);
-	      goto out;
-	    }
-	  k = curk;
-	  dst_list = curl;
-	  if (k == K_UNKNOWN || dst_list == NULL)
-	    {
-	      snprintf (merr, sizeof merr,
-			"matrix: line %d: expected 'key = value'", line_no);
-	      goto out;
-	    }
-	}
-
-      /* Value part: strip comments, then tokenize on spaces/commas.  */
-      char *hash = strchr (p, '#');
-      if (hash != NULL)
-	*hash = '\0';
-
-      char *tok = strtok (p, " \t,");
-      while (tok != NULL)
-	{
-	  if (*tok != '\0')
-	    {
-	      if (add_range_or_value (k, dst_list, tok, line_no, &both)
-		  != 0)
-		goto out;
-	    }
-	  tok = strtok (NULL, " \t,");
-	}
-    }
-
-  if (!saw_section)
-    {
-      snprintf (merr, sizeof merr,
-		"matrix: '%s' has no [%s] section", path, section);
-      goto out;
-    }
-  if (lists[0].n == 0)
-    {
-      snprintf (merr, sizeof merr,
-		"matrix: [%s] section must define 'sizes'", section);
-      goto out;
-    }
-
-  m->sizes = lists[0].v; m->nsizes = lists[0].n;
-  m->src   = lists[1].v; m->nsrc   = lists[1].n;
-  m->dst   = lists[2].v; m->ndst   = lists[2].n;
-  m->align = lists[3].v; m->nalign = lists[3].n;
-  m->fill  = lists[4].v; m->nfill  = lists[4].n;
-  m->diff  = lists[5].v; m->ndiff  = lists[5].n;
-  m->both  = (int) both;
-  rc = 0;
-
-out:
-  fclose (fp);
-  if (rc != 0)
-    {
-      for (int i = 0; i < 6; i++)
-	free (lists[i].v);
-    }
-  return rc;
 }

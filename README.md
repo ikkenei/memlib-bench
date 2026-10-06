@@ -42,8 +42,9 @@ they are standalone.
 - `--check` correctness mode against an obviously-correct byte-wise oracle.
 - JSON output compatible with `benchout_strings.schema.json`, so results can also be
   analyzed with the original glibc tooling (`tools/compare_strings.py`).
-- Configurable test matrix: sizes and offsets can live in a plain-text **profile
-  file** (`--matrix`), no recompilation needed.
+- Configurable test matrix: sizes and offsets live in plain-text **profile files**
+  (`--matrix`), no recompilation needed - the built-in glibc matrices are such files
+  too (`matrices/glibc_small.txt`, `matrices/glibc_large.txt`).
 - `tools/plot_mem.py` (`mb plot`): GB/s vs size plots, one figure per full matrix
   parameter combination (`src`×`dst`×`dir`, `align`×`fill`, ...), all implementations
   overlaid as curves, adaptive B/KB/MB size labels, L1-cache marker line.
@@ -83,7 +84,9 @@ impls/               put your implementations here (see below)
 tools/               (vendored from glibc benchtests/scripts)
   compare_strings.py, plot_strings.py, benchout_strings.schema.json, ...
   plot_mem.py        GB/s throughput graphs for this project
-matrices/            example matrix profiles
+matrices/            matrix profiles: glibc_small.txt / glibc_large.txt (the
+                     built-in defaults, compiled into the drivers) and
+                     example.txt (all notation variants, flat + blocks)
 build/               build output (created by make)
 results/             run JSON files (created by mb)
 plots/               graphs (created by plot_mem.py)
@@ -176,7 +179,7 @@ tables defaults to `libc` (then the first implementation); change it with `-b/--
 | `--quick` | short run: ~1 MiB budget/test, max length 64 KiB |
 | `--iters N` | fixed iterations per test (instead of adaptive) |
 | `--budget MB` | adaptive budget, MiB per (impl, test); default 16 |
-| `--max-len N` | cap tested lengths; above 64 KiB the "large" cases are added |
+| `--max-len N` | cap tested lengths; above 128 KiB the large matrix is added |
 | `--matrix FILE` | run the sizes/offsets from a matrix profile (below) |
 | `--seed N` | pattern seed for `--check` |
 | `--repeat N` | measure every test N times (each run is stored in the JSON) |
@@ -274,23 +277,51 @@ Syntax and semantics:
 - Buffers grow automatically to the largest size in the file; `--max-len`/`--quick`
   still act as an upper bound on lengths.
 
-## Editing the built-in matrix
+### Case blocks
 
-Without a profile file the built-in glibc matrices are used; they live in the driver
-sources, just like the original glibc benchtests:
+The glibc matrices have offsets *correlated* with the loop index (`i`, `i+32`,
+`P/2+i`, ...), which a cross product of two lists cannot express.  Such matrices are
+written as **case blocks** instead:
 
-| File | Matrix (in `main`) | Alignment mask |
-|---|---|---|
-| `src/bench_memcpy.c` | powers of two, small sizes, `16*i`, `32*i`, `2048+64*i` | `& (real_page-1)` |
-| `src/bench_memmove.c` | same + fixed `(0,32)` pairs | `& (real_page-1)` |
-| `src/bench_memset.c` | powers of two, `i`, `4096-i`, `32*i`, + a loop over `c` | `& 4095` |
-| `src/bench_memcmp.c` | `i`, `2<<i`, `16<<i`, `8<<i` | `& 4095` |
+```
+[memcpy]
+case                      # start a block (a bare `loop` starts one too)
+loop i = 0..17:1          # loop variable
+size = 1 << i             # length expression
+pairs = (0,0) (i,0) (i+32,0) (0,i) (i,i) (P/2,0) (P/2+i,i)
+both = 1
+```
 
-Each case is a `do_test(&json_ctx, align1, align2, len, both)` call: sizes are the
-`len` argument, offsets the first arguments, `both` enables both copy directions.
-Buffers (`MIN_PAGE_SIZE` = 131072 at the top of each file) grow automatically with
-`--max-len`, so for large lengths prefer `--max-len` or a matrix profile instead of
-code edits.
+- `case` / `loop <var> = <values>` start a block; a block may have up to four loop
+  variables (their cartesian product is used) and the keys `size`, `pairs`, `align`,
+  `fill`, `diff`, `both`.
+- `size` is an expression; `pairs` is a list of `(a1,a2)` expressions for
+  `memcpy`/`memmove`/`memcmp`; `align`/`fill` (memset) and `diff` (memcmp) are
+  comma-separated expression lists, so expressions may contain spaces.
+- Expressions support integers (hex allowed), the loop variables, `P` (the OS page
+  size), parentheses and `+ - * / <<`.
+- In a loop list `A..B` still means powers of two, `A..B:STEP` is linear and
+  `!pow2` drops values where `(v & (v-1)) == 0` (as glibc's `if (i & (i-1))` does).
+- For `memmove` the pairs are directed (`a1` = source, `a2` = destination), so both
+  overlap directions are written explicitly, as in `matrices/glibc_small.txt`.
+
+The flat and the block notation can be mixed in one section.
+
+## Built-in (default) matrices
+
+Without `--matrix` the drivers run the matrices from
+
+| File | Content |
+|---|---|
+| `matrices/glibc_small.txt` | the glibc benchtests default matrices |
+| `matrices/glibc_large.txt` | large-size cases, loaded when `--max-len` > 128 KiB |
+
+They are the files listed above — the benchmark code contains no matrix of its own.
+The Makefile compiles them into the drivers (`build/gen/matrix_glibc.h`), so editing
+a file and running `make` (or just `./mb run ...`, which rebuilds automatically)
+applies the change; `./mb run --matrix matrices/glibc_small.txt ...` runs the same
+matrix from the file without rebuilding.  The alignment mask applied by `do_test`
+(`& (page-1)` for the copy functions, `& 4095` for `memset`/`memcmp`) is unchanged.
 
 ## Correctness check (`mb check`)
 
