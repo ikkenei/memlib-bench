@@ -484,6 +484,7 @@ case_add (mb_matrix_t *m, size_t len, long a1, long a2, int c, int result,
   k->a2 = a2;
   k->c = c;
   k->result = result;
+  k->pos = 0;
   k->both = both;
   return 0;
 }

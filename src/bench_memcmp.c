@@ -35,14 +35,25 @@ prepare (const mb_case_t *c, int dir, mb_pointers_t *p)
 
   if (c->len)
     {
-      /* Byte just past the compared range (as in glibc bench-memcmp).  */
-      s1[c->len] = (char) a1;
-      s2[c->len] = (char) a2;
+      /* The byte just past the compared range (as in glibc bench-memcmp)
+	 is only written in the hot mode: in the batch modes the buffers
+	 must stay equal everywhere except the intended mismatch, and a
+	 sentinel is written at a different place in each buffer.  */
+      if (mb_opts->measure == MB_MEASURE_HOT)
+	{
+	  s1[c->len] = (char) a1;
+	  s2[c->len] = (char) a2;
+	}
 
       /* Where the buffers differ: the last byte of the range, or the
 	 position requested with --mismatch-at.  */
       size_t pos = c->len - 1;
-      if (mb_opts->mismatch_at > 0)
+      if (c->pos > 0)
+	{
+	  size_t at = (size_t) c->pos;
+	  pos = at <= c->len ? at - 1 : c->len - 1;
+	}
+      else if (mb_opts->mismatch_at > 0)
 	{
 	  size_t at = (size_t) mb_opts->mismatch_at;
 	  pos = at <= c->len ? at - 1 : c->len - 1;

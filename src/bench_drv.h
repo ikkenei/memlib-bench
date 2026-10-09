@@ -69,6 +69,7 @@ typedef struct
   unsigned long seed;		/* pattern seed		*/
   const char *matrix;		/* matrix profile file		*/
   const char *dist;		/* size distribution (--dist)		*/
+  const char *profile;		/* memtrace profile (--profile)		*/
   int list_dists;		/* --list-dists			*/
   int measure;			/* MB_MEASURE_*			*/
   long batch;			/* calls per randomized batch		*/

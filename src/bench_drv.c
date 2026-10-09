@@ -186,6 +186,8 @@ mb_opts_parse (mb_opts_t *o, int argc, char **argv, const char *func_symbol,
 	          exit (2);
 	        }
 	    }
+	  else if (strcmp (key, "profile") == 0)
+	    o->profile = next_arg (argc, argv, &i, "--profile", v);
 	  else if (strcmp (key, "dist") == 0)
 	    o->dist = next_arg (argc, argv, &i, "--dist", v);
 	  else if (strcmp (key, "list-dists") == 0)
@@ -356,6 +358,9 @@ mb_opts_usage (const char *argv0, const char *func_symbol,
     "                             call; mixed: random sizes and offsets\n"
     "                             per call (one result per batch)\n"
     "      --batch N              calls per randomized batch (default 1024)\n"
+    "      --profile FILE         memtrace profile for --measure mixed:\n"
+    "                             replay the captured size/alignment/shape\n"
+    "                             mix (tools/memtrace.py)\n"
     "      --dist NAME|FILE       size distribution for --measure mixed:\n"
     "                             an embedded CSV name (--list-dists) or a\n"
     "                             file path\n"

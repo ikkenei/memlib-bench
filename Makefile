@@ -49,7 +49,7 @@ BENCH_BINS  := $(BUILD)/bench_memcpy $(BUILD)/bench_memmove \
 
 COMMON_SRCS := src/json-lib.c src/bench_common.c src/bench_drv.c \
                src/generic_ref.c src/check.c src/matrix.c src/bench_driver.c \
-               src/distributions.c
+               src/distributions.c src/profile.c
 COMMON_OBJS := $(COMMON_SRCS:src/%.c=$(OBJDIR)/%.o)
 
 # User implementations: every .c in impls/ is built into its own .so

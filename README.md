@@ -49,6 +49,13 @@ they are standalone.
 - Configurable test matrix: sizes and offsets live in plain-text **profile files**
   (`--matrix`), no recompilation needed - the built-in glibc matrices are such files
   too (`matrices/glibc_small.txt`, `matrices/glibc_large.txt`).
+- `--measure offsets|mixed` and `--iters-mode precision`: llvm-libc-style
+  randomized measurement (misaligned offsets, random sizes) next to the default
+  glibc-style hot loop, including size distributions from real workloads
+  (`--dist`) and the statistics of repeated runs (`--repeat`).
+- `tools/memtrace.py` (`--profile`): capture the memory-access pattern of a
+  *running* process with eBPF/uprobes (sizes, alignments, memmove overlap,
+  memset fill byte, memcmp early exit) and replay it as a benchmark load.
 - `tools/plot_mem.py` (`mb plot`): GB/s vs size plots, one figure per full matrix
   parameter combination (`src`×`dst`×`dir`, `align`×`fill`, ...), all implementations
   overlaid as curves, adaptive B/KB/MB size labels, L1-cache marker line.
@@ -83,6 +90,7 @@ src/                 framework and drivers
   timing.h             timer (cntvct_el0 on aarch64, clock_gettime elsewhere)
   check.[ch]           correctness engine (byte-wise oracle)
   generic_ref.[ch]     generic C reference + oracle functions
+  profile.[ch]         captured access-profile loader (tools/memtrace.py)
   matrix.[ch]          matrix-profile parser
   json-lib.[ch]        (vendored from glibc) JSON writer, glibc format
   bench_memcpy.c / bench_memmove.c / bench_memset.c / bench_memcmp.c
@@ -92,6 +100,8 @@ impls/               put your implementations here (see below)
 tools/               (vendored from glibc benchtests/scripts)
   compare_strings.py, plot_strings.py, benchout_strings.schema.json, ...
   plot_mem.py        GB/s throughput graphs for this project
+  memtrace.py        capture mem* access patterns of a running process
+                     (eBPF/uprobes) as a trace or as an aggregated profile
 matrices/            matrix profiles: glibc_small.txt / glibc_large.txt (the
                      built-in defaults, compiled into the drivers) and
                      example.txt (all notation variants, flat + blocks)
@@ -199,6 +209,7 @@ tables defaults to `libc` (then the first implementation); change it with `-b/--
 | `--measure hot\|offsets\|mixed` | measurement mode (default `hot`, see below) |
 | `--batch N` | calls per randomized batch in `offsets`/`mixed` (default 1024) |
 | `--dist NAME\|FILE` | size distribution for `--measure mixed` (see `mb list`) |
+| `--profile FILE` | captured access profile for `--measure mixed` (`tools/memtrace.py`) |
 | `--list-dists` | print the embedded distribution names and exit |
 | `--iters-mode budget\|precision` | iteration policy (default `budget`) |
 | `--epsilon X` | precision target for `--iters-mode precision` (default 0.01) |
@@ -267,7 +278,7 @@ measure the same functions with randomized parameters:
 |---|---|---|
 | `hot` (default) | the same size and offsets every call | one object per matrix case |
 | `offsets` | the matrix sizes; **random offsets** on every call | one object per matrix case (`offsets="random"`) |
-| `mixed` | **random sizes** (drawn from the matrix's size pool) and **random offsets** | one object per (fill byte / expected result) group and repetition |
+| `mixed` | **random sizes** (drawn from the matrix's size pool, a `--dist` distribution or a `--profile` capture) and **random offsets** | one object per (fill byte / expected result) group and repetition |
 
 ```sh
 ./mb run memcpy --measure offsets --batch 1024 --repeat 5   # average over misalignment
@@ -325,6 +336,10 @@ src = 0 3
 dst = 0
 ```
 
+A capture taken from a *running* process (`--profile`, see the next section) is
+the richer variant of the same idea: it also carries the alignment and the
+semantic class of each call.
+
 - `--iters-mode precision` (with `--epsilon`, `--scaling`, `--min-samples`,
   `--max-samples`, `--min-duration`, `--max-duration`) replaces the byte budget with
   llvm-libc's stopping rule: iterations grow geometrically until the running mean
@@ -334,6 +349,96 @@ dst = 0
 - Diagnostics: `MB_DEBUG_BATCH=1` prints the first batch parameters and the
   sampled mean size, `MB_DEBUG_PRECISION=1` prints the samples/calls used per
   precision measurement, `MB_DEBUG_DIST=1` prints the parsed distribution size.
+
+## Capturing a real workload (`tools/memtrace.py`)
+
+Everything above measures sizes and offsets that *we* choose.  To measure the
+pattern a *real* program produces, `tools/memtrace.py` attaches to a running
+process with uprobes (bpftrace/eBPF) and records every call to the libc memory
+functions: size, pointer alignment, and the interesting semantic classes
+(memmove overlap direction/distance, memset fill byte, memcmp equal/unequal).
+
+```sh
+# 1. show what would be probed (no root needed)
+./tools/memtrace.py list --pid 1234            # or --libc /path/to/libc.so.6
+# 2. dump the generated bpftrace program (no root needed)
+./tools/memtrace.py script --pid 1234 --mode stats -o trace.bt
+# 3. collect (root: uprobes are privileged)
+sudo ./tools/memtrace.py attach-stats --pid 1234 -o trace.profile
+sudo ./tools/memtrace.py attach-stats -c ./my-program -o trace.profile \
+     --sizes-csv sizes.csv
+sudo ./tools/memtrace.py attach-trace --pid 1234 -o trace.csv
+
+# 4. inspect / convert
+./tools/memtrace.py show --input trace.profile
+./tools/memtrace.py convert --input trace.csv --profile trace.profile \
+     --sizes-csv sizes.csv
+```
+
+- `attach-stats` aggregates in kernel maps and is the useful mode: it writes the
+  profile described below.  `attach-trace` writes one row per call (the full
+  trace), which is only practical for short runs - each uprobe costs on the order
+  of a microsecond, so the tracer perturbs the process.  Profiles capture
+  *patterns*, not timings: detach the tracer and measure the same workload with
+  the normal drivers.
+- `list` resolves the libc path from `/proc/PID/maps`, reads its symbol table and
+  shows which concrete implementations will be probed.  `memcpy` and friends are
+  IFUNCs, so the real implementation symbols (`__memcpy_avx512_unaligned`, ...)
+  are probed; the `*_chk` wrappers are skipped so that calls are not counted
+  twice.  Shared addresses (e.g. `__memcpy_erms == __memmove_erms`) are probed
+  once and reported in the notes.
+- `convert` aggregates a trace into a profile and/or a size histogram
+  (`--profile` / `--sizes-csv`, one or both), and `--sample K` scales the counts
+  down if the capture is too large.  `attach-stats` can write the size CSV
+  directly with `--sizes-csv`.
+- `--memcmp-window N` (0/8/16/32/64) additionally reads the first N bytes at call
+  entry to classify a mismatch as "within the first N bytes"; without it a
+  memcmp is only classified as equal/unequal.
+
+### Profile format (`--profile FILE`)
+
+The profile is a small text file with one line per (function, size, alignment,
+class) group; `#` starts a comment:
+
+```
+# function,size,count,src_align,dst_align,class,attr
+memcpy,64,120394,0,0,0,0
+memmove,4096,821,0,0,2,16
+memset,32,50113,0,0,6,170
+memcmp,256,9002,0,0,7,0
+```
+
+`src_align`/`dst_align` are the low bits of the two pointers (0 = cache-line
+aligned), `count` weights the group, and the class records what the call actually
+did:
+
+| class | function | meaning | `attr` |
+|---|---|---|---|
+| 0 | any | plain call | - |
+| 1 / 2 | memmove | forward, disjoint / overlapping | distance in bytes |
+| 3 / 4 | memmove | backward, disjoint / overlapping | distance in bytes |
+| 5 / 6 | memset | fill byte is zero / non-zero | the fill byte |
+| 7 / 8 | memcmp | ranges are equal / differ | mismatch byte (1-based, 0 = last) |
+
+The benchmark turns every group into a batch, so the *classes* are exercised too
+(overlapping memmove, zeroing memset, early-exit memcmp) - something the matrix
+profiles cannot express:
+
+```sh
+./mb run memmove --measure mixed --profile trace.profile --repeat 5
+./mb run memcpy  --measure mixed --profile trace.profile --summary size
+```
+
+Each reported row carries `offsets="profile"`, `profile=<name>`,
+`mode=<class>[@attr]` and `sizes="min..max"`, so the results say which pattern
+was measured.  A profile can also be reduced to a plain size histogram by
+`convert --sizes-csv sizes.csv`, which `--dist` accepts.
+
+Limitations: in the batch modes `memcmp` uses one alignment for both pointers, so
+its `src_align`/`dst_align` are ignored; a `differs` group's mismatch byte is
+approximate, because the mismatch bytes written for the other batch elements may
+fall inside the measured range; and the `--memcmp-window` path needs a recent
+bpftrace and could only be validated offline in this environment.
 
 ## Matrix profiles (`--matrix FILE`)
 
@@ -569,9 +674,9 @@ checks on an x86 host.
 ## License & provenance
 
 The original code of this project (everything under `src/`, `cli/`,
-`tools/plot_mem.py`, the `impls/` examples, `Makefile`, `mb`, and `matrices/`
-except the distributions directory) is released under the **MIT License** - see
-[LICENSE](LICENSE).
+`tools/plot_mem.py`, `tools/memtrace.py`, the `impls/` examples, `Makefile`, `mb`,
+and `matrices/` except the distributions directory) is released under the **MIT
+License** - see [LICENSE](LICENSE).
 
 **Vendored from the GNU C Library** (benchtests), under the GNU Lesser General
 Public License, version 2.1 or later (as stated in their headers):
@@ -599,6 +704,9 @@ v2.0 with LLVM Exceptions:
 - Detailed glibc tables (`--table full`): the Python module `jsonschema`.
 - Graphs (`mb plot` → `tools/plot_mem.py`, `mb plot-glibc` → `tools/plot_strings.py`):
   `matplotlib` (+`jsonschema`, `numpy` for the glibc script).
+- Capturing a profile from a running process (`tools/memtrace.py attach-*`):
+  `bpftrace` and root - uprobes are privileged.  Its `list`, `script`, `show` and
+  `convert` subcommands work without root.
 
 ## Notes
 

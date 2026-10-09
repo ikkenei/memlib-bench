@@ -1,6 +1,7 @@
 /* Shared driver core (implementation).  See bench_driver.h. */
 
 #include "bench_driver.h"
+#include "profile.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -120,13 +121,15 @@ batch_free (mb_batch_t *b)
   b->n = 0;
 }
 
-/* Where the sizes of a randomized batch come from: a plain list (uniform
-   sampling) or an empirical distribution (weighted sampling).  */
+/* Where the calls of a randomized batch come from: a plain list of sizes
+   (uniform sampling), an empirical size distribution (weighted), or a
+   memtrace profile group (whole cases, weighted).  */
 typedef struct
 {
   const size_t *sizes;
   size_t nsizes;
   const mb_dist_t *dist;
+  const mb_profile_group_t *profile;
 } mb_sizes_t;
 
 static size_t
@@ -156,38 +159,59 @@ batch_build (const mb_func_t *f, const mb_case_t *c, const mb_sizes_t *pool,
 
   for (size_t i = 0; i < count; i++)
     {
-      size_t len = sizes_sample (pool);
       int ok = 0;
 
       for (int tries = 0; tries < 16 && !ok; tries++)
 	{
-	  mb_case_t t = *c;
-	  t.len = len;
-	  t.both = 0;			/* batch modes run one direction */
-
-	  if (f->sig == MB_SIG_MOVE)
+	  mb_case_t t;
+	  if (pool->profile != NULL)
 	    {
-	      /* Keep the overlap distance of the matrix case.  */
-	      long long lo = delta < 0 ? -delta : 0;
-	      long long hi = (long long) mask - (delta > 0 ? delta : 0);
-	      if (hi < lo)
-		{
-		  t.a1 = c->a1;
-		  t.a2 = c->a2;
-		}
-	      else
-		{
-		  long long base = lo + (long long) mb_rng_below (&rng_state,
-								    (uint64_t) (hi - lo + 1));
-		  t.a1 = base;
-		  t.a2 = base + delta;
-		}
+	      /* A profile row carries the size, the alignments and the
+		 call shape; use it as is.  */
+	      const mb_case_t *pc = mb_profile_sample (pool->profile,
+						       &rng_state);
+	      if (pc == NULL)
+		break;
+	      t = *pc;
 	    }
 	  else
 	    {
-	      t.a1 = (long) mb_rng_below (&rng_state, mask + 1);
-	      t.a2 = (long) mb_rng_below (&rng_state, mask + 1);
+	      t = *c;
+	      t.len = sizes_sample (pool);
+	      t.both = 0;		/* batch modes run one direction */
+
+	      if (f->sig == MB_SIG_MOVE)
+		{
+		  /* Keep the overlap distance of the matrix case.  */
+		  long long lo = delta < 0 ? -delta : 0;
+		  long long hi = (long long) mask - (delta > 0 ? delta : 0);
+		  if (hi < lo)
+		    {
+		      t.a1 = c->a1;
+		      t.a2 = c->a2;
+		    }
+		  else
+		    {
+		      long long base = lo
+			+ (long long) mb_rng_below (&rng_state,
+						    (uint64_t) (hi - lo + 1));
+		      t.a1 = base;
+		      t.a2 = base + delta;
+		    }
+		}
+	      else
+		{
+		  t.a1 = (long) mb_rng_below (&rng_state, mask + 1);
+		  t.a2 = (long) mb_rng_below (&rng_state, mask + 1);
+		}
 	    }
+	  /* The two benchmark buffers only hold equal bytes at equal
+	     offsets, so a memcmp case must compare at the same alignment
+	     (which is also what the common case looks like in practice:
+	     both pointers come from the same kind of object).  */
+	  if (f->sig == MB_SIG_CMP)
+	    t.a2 = t.a1;
+
 	  ok = f->prepare (&t, 0, &b->p[i]) > 0;
 	}
 
@@ -206,11 +230,19 @@ batch_build (const mb_func_t *f, const mb_case_t *c, const mb_sizes_t *pool,
   if (getenv ("MB_DEBUG_BATCH") != NULL)
     {
       double sum = 0.0;
+      size_t lmin = 0, lmax = 0;
       for (size_t i = 0; i < b->n; i++)
-	sum += (double) b->p[i].len;
+	{
+	  sum += (double) b->p[i].len;
+	  if (i == 0 || b->p[i].len < lmin)
+	    lmin = b->p[i].len;
+	  if (i == 0 || b->p[i].len > lmax)
+	    lmax = b->p[i].len;
+	}
       fprintf (stderr, "[memlib] batch: n=%zu mean_len=%.1f first=(len=%zu, "
-	       "a1=%lu, a2=%lu)\n", b->n, sum / (double) b->n,
-	       b->p[0].len, b->p[0].a1, b->p[0].a2);
+	       "a1=%lu, a2=%lu, dst=%p, src=%p, len=%zu..%zu)\n", b->n,
+	       sum / (double) b->n, b->p[0].len, b->p[0].a1, b->p[0].a2,
+	       b->p[0].dst, b->p[0].src, lmin, lmax);
     }
   return 0;
 }
@@ -384,21 +416,37 @@ measure_impl (const mb_func_t *f, const mb_impl_t *impl,
 /* Matrix execution                                                   */
 /* ------------------------------------------------------------------ */
 
+/* Description of a randomized batch, for the JSON output.  */
+typedef struct
+{
+  size_t length;		/* the "length" attribute		*/
+  const char *offsets;		/* "random"/"profile" or NULL		*/
+  const char *sizes;		/* "min..max" or NULL			*/
+  const char *dist;		/* distribution name or NULL		*/
+  const char *profile;		/* profile name or NULL			*/
+  const char *mode;		/* call shape (class[@attr]) or NULL	*/
+} mb_batch_attrs_t;
+
 /* Emit the JSON object of one randomized batch.  RUN < 0 omits the
    repetition attribute.  */
 static void
 emit_batch (json_ctx_t *ctx, const mb_func_t *f, const mb_case_t *c,
-	    const mb_batch_t *b, size_t length, const char *sizes,
-	    const char *dist_name, long run, size_t iters)
+	    const mb_batch_t *b, const mb_batch_attrs_t *a, long run,
+	    size_t iters)
 {
   json_element_object_begin (ctx);
-  json_attr_uint (ctx, "length", length);
-  json_attr_string (ctx, "offsets", "random");
+  json_attr_uint (ctx, "length", a->length);
   json_attr_uint (ctx, "batch", b->n);
-  if (dist_name != NULL)
-    json_attr_string (ctx, "dist", dist_name);
-  if (sizes != NULL)
-    json_attr_string (ctx, "sizes", sizes);
+  if (a->offsets != NULL)
+    json_attr_string (ctx, "offsets", a->offsets);
+  if (a->dist != NULL)
+    json_attr_string (ctx, "dist", a->dist);
+  if (a->profile != NULL)
+    json_attr_string (ctx, "profile", a->profile);
+  if (a->mode != NULL)
+    json_attr_string (ctx, "mode", a->mode);
+  if (a->sizes != NULL)
+    json_attr_string (ctx, "sizes", a->sizes);
   if (f->attrs_batch != NULL)
     f->attrs_batch (ctx, c);
   if (run >= 0)
@@ -430,14 +478,14 @@ run_offsets_mode (json_ctx_t *ctx, const mb_matrix_t *m, const mb_func_t *f,
       for (size_t r = 0; r < reps; r++)
 	{
 	  size_t sizes[1] = { c->len };
-	  mb_sizes_t pool = { sizes, 1, NULL };
+	  mb_sizes_t pool = { .sizes = sizes, .nsizes = 1 };
 	  mb_batch_t b;
 	  if (batch_build (f, c, &pool, count, &b) != 0)
 	    continue;
 	  for (int i = 0; i < mb_impl_count (); i++)
 	    warm_batch (f, mb_impl_get (i), &b, iters);
-	  emit_batch (ctx, f, c, &b, c->len, NULL, NULL,
-		      reps > 1 ? (long) r : -1, iters);
+	  mb_batch_attrs_t a = { .length = c->len, .offsets = "random" };
+	  emit_batch (ctx, f, c, &b, &a, reps > 1 ? (long) r : -1, iters);
 	  batch_free (&b);
 	}
     }
@@ -528,7 +576,7 @@ dist_stats (const mb_dist_t *d, size_t *mean, size_t *lo, size_t *hi)
    and repetition, each repetition with a fresh batch.  */
 static void
 run_mixed_mode (json_ctx_t *ctx, const mb_matrix_t *m, const mb_func_t *f,
-		size_t reps)
+		size_t reps, const mb_profile_t *profile)
 {
   size_t count = (size_t) mb_opts->batch;
   struct mixed_group *groups = NULL;
@@ -596,15 +644,33 @@ run_mixed_mode (json_ctx_t *ctx, const mb_matrix_t *m, const mb_func_t *f,
       g->pool[g->n++] = c->len;
     }
 
-  for (size_t j = 0; j < ngroups; j++)
+  size_t niter = profile != NULL ? profile->ngroups : ngroups;
+  for (size_t j = 0; j < niter; j++)
     {
-      struct mixed_group *g = &groups[j];
+      struct mixed_group *g = profile != NULL ? NULL : &groups[j];
       mb_sizes_t pool;
       mb_dist_t filtered;
       int have_dist = 0;
+      int profile_group = 0;
       size_t mean, minlen, maxlen;
 
-      if (m->dist.n > 0)
+      if (profile != NULL)
+	{
+	  /* A profile group is the load: its rows carry size, alignment
+	     and call shape.  */
+	  const mb_profile_group_t *pg = &profile->groups[j];
+	  if (pg->n == 0)
+	    continue;
+	  profile_group = 1;
+	  pool.sizes = NULL;
+	  pool.nsizes = 0;
+	  pool.dist = NULL;
+	  pool.profile = pg;
+	  mean = pg->mean_len;
+	  minlen = pg->min_len;
+	  maxlen = pg->max_len;
+	}
+      else if (m->dist.n > 0)
 	{
 	  if (filter_dist (&m->dist, f, &g->rep, &filtered) != 0)
 	    {
@@ -625,6 +691,7 @@ run_mixed_mode (json_ctx_t *ctx, const mb_matrix_t *m, const mb_func_t *f,
 	  pool.sizes = g->pool;
 	  pool.nsizes = g->n;
 	  pool.dist = NULL;
+	  pool.profile = NULL;
 	  minlen = maxlen = g->pool[0];
 	  double sum = 0.0;
 	  for (size_t i = 0; i < g->n; i++)
@@ -639,19 +706,44 @@ run_mixed_mode (json_ctx_t *ctx, const mb_matrix_t *m, const mb_func_t *f,
 	}
 
       char sizes_str[64];
+      char mode_str[64];
+      const char *mode = NULL;
+      const mb_case_t *rep = profile_group ? &profile->groups[j].cases[0]
+					   : &g->rep;
       snprintf (sizes_str, sizeof sizes_str, "%zu..%zu", minlen, maxlen);
+      if (profile_group)
+	{
+	  int cls = profile->groups[j].cls;
+	  int attr = profile->groups[j].attr;
+	  if (attr > 0 && cls != 0)
+	    snprintf (mode_str, sizeof mode_str, "%s@%d",
+		      mb_profile_class_name (cls), attr);
+	  else
+	    snprintf (mode_str, sizeof mode_str, "%s",
+		      mb_profile_class_name (cls));
+	  mode = mode_str;
+	}
+      mb_batch_attrs_t a = {
+	.length = mean,
+	.offsets = profile_group ? "profile" : "random",
+	.sizes = sizes_str,
+	.dist = have_dist ? m->dist.name : NULL,
+	.profile = profile_group ? profile->name : NULL,
+	.mode = mode,
+      };
       size_t iters = mb_pick_iters (mb_opts, mean == 0 ? 1 : mean);
+      if (getenv ("MB_DEBUG_BATCH") != NULL)
+	fprintf (stderr, "[memlib] mixed: mode=%s mean=%zu iters=%zu\n",
+		 mode != NULL ? mode : "-", mean, iters);
 
       for (size_t r = 0; r < reps; r++)
 	{
 	  mb_batch_t b;
-	  if (batch_build (f, &g->rep, &pool, count, &b) != 0)
+	  if (batch_build (f, rep, &pool, count, &b) != 0)
 	    break;
 	  for (int i = 0; i < mb_impl_count (); i++)
 	    warm_batch (f, mb_impl_get (i), &b, iters);
-	  emit_batch (ctx, f, &g->rep, &b, mean, sizes_str,
-		      have_dist ? m->dist.name : NULL,
-		      reps > 1 ? (long) r : -1, iters);
+	  emit_batch (ctx, f, rep, &b, &a, reps > 1 ? (long) r : -1, iters);
 	  batch_free (&b);
 	}
       if (have_dist)
@@ -664,7 +756,8 @@ run_mixed_mode (json_ctx_t *ctx, const mb_matrix_t *m, const mb_func_t *f,
 }
 
 static void
-run_matrix (json_ctx_t *ctx, const mb_matrix_t *m, const mb_func_t *f)
+run_matrix (json_ctx_t *ctx, const mb_matrix_t *m, const mb_func_t *f,
+	    const mb_profile_t *profile)
 {
   mb_pointers_t p;
   size_t reps = mb_opts->repeat > 0 ? (size_t) mb_opts->repeat : 1;
@@ -676,7 +769,7 @@ run_matrix (json_ctx_t *ctx, const mb_matrix_t *m, const mb_func_t *f)
     }
   if (mb_opts->measure == MB_MEASURE_MIXED)
     {
-      run_mixed_mode (ctx, m, f, reps);
+      run_mixed_mode (ctx, m, f, reps, profile);
       return;
     }
 
@@ -804,8 +897,27 @@ mb_driver_main (const mb_func_t *func, int argc, char **argv)
 	}
     }
 
-  /* An explicit --dist overrides the profile's distribution; it only
-     makes sense for the randomized measurement mode.  */
+  /* A memtrace profile is a load for the randomized measurement mode.  */
+  mb_profile_t profile;
+  mb_profile_init (&profile);
+  int have_profile = 0;
+  if (!o.check && o.profile != NULL)
+    {
+      if (o.measure != MB_MEASURE_MIXED)
+	{
+	  fprintf (stderr, "error: --profile requires --measure mixed\n");
+	  return 1;
+	}
+      if (mb_profile_load (o.profile, func->name, &profile) != 0)
+	{
+	  fprintf (stderr, "error: %s\n", mb_profile_err ());
+	  return 1;
+	}
+      have_profile = 1;
+    }
+
+  /* An explicit --dist overrides the distribution of the matrix profile;
+     it only makes sense for the randomized measurement mode.  */
   if (!o.check && o.dist != NULL)
     {
       if (o.measure != MB_MEASURE_MIXED)
@@ -826,7 +938,10 @@ mb_driver_main (const mb_func_t *func, int argc, char **argv)
   long long mmax = mb_matrix_max_len (&mx);
   if (mx.dist.n > 0 && (long long) mb_dist_max (&mx.dist) > mmax)
     mmax = (long long) mb_dist_max (&mx.dist);
-  if (!o.check && (o.matrix != NULL || mx.dist.n > 0) && (size_t) mmax > want)
+  if (have_profile && (long long) profile.max_len > mmax)
+    mmax = (long long) profile.max_len;
+  if (!o.check && (o.matrix != NULL || mx.dist.n > 0 || have_profile)
+      && (size_t) mmax > want)
     want = (size_t) mmax;
   if (mb_buffers_init (MB_MIN_PAGE_SIZE, want) == 0)
     {
@@ -839,11 +954,13 @@ mb_driver_main (const mb_func_t *func, int argc, char **argv)
 
   /* The batch modes do not fill the source pattern per case (that would
      dominate the run for large sizes); touch the buffers once so that no
-     page fault lands inside a measurement.  */
+     page fault lands inside a measurement.  Both buffers get the SAME
+     content: that way a memcmp case only differs where the case itself
+     writes its mismatch byte.  */
   if (o.measure != MB_MEASURE_HOT)
     {
       mb_fill (mb_buf1.base, mb_buf1.size, o.seed ^ 0x5a5a5a5aUL);
-      mb_fill (mb_buf2.base, mb_buf2.size, o.seed ^ 0xa5a5a5a5UL);
+      mb_fill (mb_buf2.base, mb_buf2.size, o.seed ^ 0x5a5a5a5aUL);
     }
 
   if (getenv ("MB_NO_WARMUP") == NULL)
@@ -863,7 +980,7 @@ mb_driver_main (const mb_func_t *func, int argc, char **argv)
   json_array_end (&ctx);
 
   json_array_begin (&ctx, "results");
-  run_matrix (&ctx, &mx, func);
+  run_matrix (&ctx, &mx, func, have_profile ? &profile : NULL);
   json_array_end (&ctx);
 
   json_attr_object_end (&ctx);
@@ -872,6 +989,7 @@ mb_driver_main (const mb_func_t *func, int argc, char **argv)
   putchar ('\n');
 
   mb_matrix_free (&mx);
+  mb_profile_free (&profile);
   mb_buffers_free ();
   return 0;
 }

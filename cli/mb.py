@@ -195,6 +195,7 @@ def driver_cmd(fn, args, impls, check):
                       ("--repeat", "repeat"),
                       ("--measure", "measure"), ("--batch", "batch"),
                       ("--dist", "dist"),
+                      ("--profile", "profile"),
                       ("--iters-mode", "iters_mode"),
                       ("--epsilon", "epsilon"), ("--scaling", "scaling"),
                       ("--initial-iters", "initial_iters"),
@@ -979,6 +980,10 @@ def build_parser():
                    help="size distribution for --measure mixed: an "
                         "embedded CSV name (see `mb list`) or a file "
                         "with 'size,weight' pairs / one weight per line")
+    r.add_argument("--profile", default=None, metavar="FILE",
+                   help="captured memory-access profile for --measure "
+                        "mixed: a file written by tools/memtrace.py "
+                        "(see its `show`/`convert` subcommands)")
     r.add_argument("--iters-mode", choices=["budget", "precision"],
                    default=None,
                    help="iteration policy: budget (default) or precision "

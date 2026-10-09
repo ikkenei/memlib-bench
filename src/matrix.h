@@ -57,6 +57,7 @@ typedef struct
   long a1, a2;			/* offsets; for memset a1 = alignment	*/
   int c;			/* memset fill byte			*/
   int result;			/* memcmp expected result		*/
+  int pos;			/* memcmp mismatch byte (1-based, 0=last) */
   int both;			/* copy functions: both directions	*/
 } mb_case_t;
 
