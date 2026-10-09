@@ -186,6 +186,10 @@ mb_opts_parse (mb_opts_t *o, int argc, char **argv, const char *func_symbol,
 	          exit (2);
 	        }
 	    }
+	  else if (strcmp (key, "dist") == 0)
+	    o->dist = next_arg (argc, argv, &i, "--dist", v);
+	  else if (strcmp (key, "list-dists") == 0)
+	    o->list_dists = 1;
 	  else if (strcmp (key, "batch") == 0)
 	    o->batch = parse_long ("--batch",
 	                           next_arg (argc, argv, &i, "--batch", v));
@@ -352,6 +356,11 @@ mb_opts_usage (const char *argv0, const char *func_symbol,
     "                             call; mixed: random sizes and offsets\n"
     "                             per call (one result per batch)\n"
     "      --batch N              calls per randomized batch (default 1024)\n"
+    "      --dist NAME|FILE       size distribution for --measure mixed:\n"
+    "                             an embedded CSV name (--list-dists) or a\n"
+    "                             file path\n"
+    "      --list-dists           print the embedded distribution names and\n"
+    "                             exit\n"
     "      --iters-mode MODE      budget (default) or precision (grow the\n"
     "                             iteration count until the estimate settles)\n"
     "      --epsilon X            precision target (default 0.01 = 1%%)\n"
@@ -445,11 +454,13 @@ mb_warmup_iters (size_t iters)
 }
 
 int
-mb_matrix_load_default (const char *section, int with_large, mb_matrix_t *m)
+mb_matrix_load_default (const char *section, int with_large, uint64_t seed,
+			mb_matrix_t *m)
 {
-  if (mb_matrix_parse (mb_glibc_small_text, section, m) != 0)
+  if (mb_matrix_parse (mb_glibc_small_text, section, seed, m) != 0)
     return -1;
-  if (with_large && mb_matrix_parse (mb_glibc_large_text, section, m) != 0)
+  if (with_large
+      && mb_matrix_parse (mb_glibc_large_text, section, seed, m) != 0)
     return -1;
   return 0;
 }

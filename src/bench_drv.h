@@ -68,6 +68,8 @@ typedef struct
   long repeat;			/* measurements per test (>=1)	*/
   unsigned long seed;		/* pattern seed		*/
   const char *matrix;		/* matrix profile file		*/
+  const char *dist;		/* size distribution (--dist)		*/
+  int list_dists;		/* --list-dists			*/
   int measure;			/* MB_MEASURE_*			*/
   long batch;			/* calls per randomized batch		*/
   long mismatch_at;		/* memcmp: mismatch at byte N-1 (0 = off) */

@@ -95,6 +95,26 @@ void mb_fill (unsigned char *p, size_t n, uint64_t seed);
 /* Current implementation name, for the crash reporter.  */
 extern const char *mb_current_impl;
 
+/* xorshift64 step; *STATE must be non-zero.  Shared by the randomized
+   batch parameters and by the size distributions.  */
+static inline uint64_t
+mb_rng_next (uint64_t *state)
+{
+  uint64_t x = *state;
+  x ^= x << 13;
+  x ^= x >> 7;
+  x ^= x << 17;
+  *state = x;
+  return x;
+}
+
+/* Uniform value in [0, n); n == 0 yields 0.  */
+static inline uint64_t
+mb_rng_below (uint64_t *state, uint64_t n)
+{
+  return n > 0 ? mb_rng_next (state) % n : 0;
+}
+
 /* Install a SIGSEGV/SIGBUS handler that reports mb_current_impl and the
    faulting address, then exits with a distinct code (4).  Returns the
    previous disposition.  Install once at startup of the driver.  */

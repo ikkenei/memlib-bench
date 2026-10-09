@@ -47,6 +47,9 @@
 #define MB_MATRIX_H
 
 #include <stddef.h>
+#include <stdint.h>
+
+#include "distributions.h"
 
 typedef struct
 {
@@ -61,6 +64,10 @@ typedef struct
 {
   mb_case_t *cases;
   size_t ncases, cap;
+  /* Size distribution, when the profile used 'dist = NAME' (or when the
+     driver was given --dist).  The randomized ("mixed") mode samples
+     sizes from it instead of using a uniform size pool.  */
+  mb_dist_t dist;
 } mb_matrix_t;
 
 void mb_matrix_init (mb_matrix_t *m);
@@ -68,14 +75,15 @@ void mb_matrix_free (mb_matrix_t *m);
 
 /* Parse a file / a text buffer, keeping only SECTION (the function name).
    Returns 0 on success, -1 on failure (message via mb_matrix_err).  */
-int mb_matrix_load (const char *path, const char *section, mb_matrix_t *m);
-int mb_matrix_parse (const char *text, const char *section,
+int mb_matrix_load (const char *path, const char *section, uint64_t seed,
+		    mb_matrix_t *m);
+int mb_matrix_parse (const char *text, const char *section, uint64_t seed,
 		     mb_matrix_t *m);
 
 /* The matrices compiled into the drivers (matrices/glibc_*.txt).  WITH_LARGE
    also loads the large-size matrix.  */
 int mb_matrix_load_default (const char *section, int with_large,
-			    mb_matrix_t *m);
+			    uint64_t seed, mb_matrix_t *m);
 
 const char *mb_matrix_err (void);
 

@@ -394,7 +394,7 @@ eval_expr (const char *expr, const loopvar_t *loops, const long long *vals,
 
 enum
 { K_NONE = 0, K_SIZES, K_SRC, K_DST, K_ALIGN, K_FILL, K_DIFF, K_BOTH,
-  K_LOOP, K_CASE, K_SIZE, K_PAIRS };
+  K_LOOP, K_CASE, K_SIZE, K_PAIRS, K_DIST, K_DIST_SAMPLES };
 
 enum
 { G_NONE = 0, G_FLAT, G_BLOCK };
@@ -412,6 +412,8 @@ typedef struct
   /* flat lists */
   list_t sizes, src, dst, align, fill, diff;
   int both;
+  char *dist_name;		/* 'dist = NAME'			*/
+  long dist_samples;		/* sizes to sample for the cases	*/
 
   /* block */
   loopvar_t loops[MAX_LOOPS];
@@ -451,6 +453,7 @@ group_reset (group_t *g)
     free (g->fills[i]);
   for (size_t i = 0; i < g->ndiffs; i++)
     free (g->diffs[i]);
+  free (g->dist_name);
   memset (g, 0, sizeof *g);
 }
 
@@ -540,13 +543,66 @@ page_size (void)
 }
 
 static int
-expand_flat (group_t *g, const char *section, mb_matrix_t *m)
+expand_flat (group_t *g, const char *section, mb_matrix_t *m, uint64_t seed)
 {
   int line = g->line_no;
+
+  if (g->dist_name != NULL)
+    {
+      /* The sizes come from a distribution: sample a bounded set of
+	 distinct sizes for the individual cases, and remember the whole
+	 distribution for the randomized ("mixed") measurement mode.  */
+      if (g->sizes.n != 0)
+	{
+	  set_err ("matrix: line %d: use either 'sizes' or 'dist', not both",
+		   line);
+	  return -1;
+	}
+      mb_dist_t d;
+      mb_dist_init (&d);
+      if (mb_dist_load (g->dist_name, &d) != 0)
+	{
+	  set_err ("matrix: line %d: %s", line, mb_dist_err ());
+	  return -1;
+	}
+      size_t want = g->dist_samples > 0 ? (size_t) g->dist_samples : 64;
+      uint64_t st = seed | UINT64_C (1);
+      size_t attempts = 0, max_attempts = want * 64 + 1024;
+      while (g->sizes.n < want && g->sizes.n < d.n && attempts < max_attempts)
+	{
+	  attempts++;
+	  size_t v = mb_dist_sample (&d, &st);
+	  int seen = 0;
+	  for (size_t i = 0; i < g->sizes.n; i++)
+	    if (g->sizes.v[i] == (long long) v)
+	      {
+		seen = 1;
+		break;
+	      }
+	  if (!seen && list_push (&g->sizes, (long long) v) != 0)
+	    {
+	      mb_dist_free (&d);
+	      set_err ("matrix: too many values");
+	      return -1;
+	    }
+	}
+      /* Cases in ascending size order.  */
+      for (size_t i = 0; i + 1 < g->sizes.n; i++)
+	for (size_t j = i + 1; j < g->sizes.n; j++)
+	  if (g->sizes.v[j] < g->sizes.v[i])
+	    {
+	      long long t = g->sizes.v[i];
+	      g->sizes.v[i] = g->sizes.v[j];
+	      g->sizes.v[j] = t;
+	    }
+      mb_dist_free (&m->dist);
+      m->dist = d;
+    }
+
   if (g->sizes.n == 0)
     {
-      set_err ("matrix: line %d: the [%s] group must define 'sizes'",
-	       line, section);
+      set_err ("matrix: line %d: the [%s] group must define 'sizes' or "
+	       "'dist'", line, section);
       return -1;
     }
 
@@ -657,8 +713,9 @@ expand_flat (group_t *g, const char *section, mb_matrix_t *m)
 }
 
 static int
-expand_block (group_t *g, const char *section, mb_matrix_t *m)
+expand_block (group_t *g, const char *section, mb_matrix_t *m, uint64_t seed)
 {
+  (void) seed;
   long long page = page_size ();
   int line = g->line_no;
   long long vals[MAX_LOOPS] = { 0, 0, 0, 0 };
@@ -800,6 +857,10 @@ key_of (const char *key)
     return K_CASE;
   if (!strcmp (key, "pairs"))
     return K_PAIRS;
+  if (!strcmp (key, "dist") || !strcmp (key, "distribution"))
+    return K_DIST;
+  if (!strcmp (key, "dist-samples") || !strcmp (key, "dist_samples"))
+    return K_DIST_SAMPLES;
   return K_NONE;
 }
 
@@ -908,6 +969,39 @@ append_key_values (group_t *g, int k, const char *val, int line_no)
       g->size_expr = strdup (skip_ws (val));
       if (g->size_expr == NULL)
 	return -1;
+      return 0;
+    }
+
+  if (k == K_DIST)
+    {
+      if (g->mode != G_FLAT)
+	{
+	  set_err ("matrix: line %d: 'dist' is only valid with the flat "
+		   "notation (sizes/src/dst or align/fill)", line_no);
+	  return -1;
+	}
+      free (g->dist_name);
+      g->dist_name = strdup (skip_ws (val));
+      if (g->dist_name == NULL)
+	return -1;
+      /* Drop trailing spaces left by the raw value.  */
+      char *e = g->dist_name + strlen (g->dist_name);
+      while (e > g->dist_name && (e[-1] == ' ' || e[-1] == '\t'))
+	*--e = '\0';
+      return 0;
+    }
+
+  if (k == K_DIST_SAMPLES)
+    {
+      char *end = NULL;
+      long v = strtol (skip_ws (val), &end, 0);
+      if (end == val || v <= 0)
+	{
+	  set_err ("matrix: line %d: 'dist-samples' must be positive",
+		   line_no);
+	  return -1;
+	}
+      g->dist_samples = v;
       return 0;
     }
 
@@ -1082,7 +1176,8 @@ loop_append (group_t *g, const char *val, int line_no)
 /* ------------------------------------------------------------------ */
 
 int
-mb_matrix_parse (const char *text, const char *section, mb_matrix_t *m)
+mb_matrix_parse (const char *text, const char *section, uint64_t seed,
+		 mb_matrix_t *m)
 {
   group_t g;
   memset (&g, 0, sizeof g);
@@ -1126,8 +1221,8 @@ mb_matrix_parse (const char *text, const char *section, mb_matrix_t *m)
 	  if (active && g.mode != G_NONE)
 	    {
 	      int bad = (g.mode == G_FLAT)
-		? expand_flat (&g, section, m)
-		: expand_block (&g, section, m);
+		? expand_flat (&g, section, m, seed)
+		: expand_block (&g, section, m, seed);
 	      group_reset (&g);
 	      if (bad != 0)
 		goto out;
@@ -1150,7 +1245,7 @@ mb_matrix_parse (const char *text, const char *section, mb_matrix_t *m)
 	    {
 	      if (g.mode == G_FLAT)
 		{
-		  int bad = expand_flat (&g, section, m);
+		  int bad = expand_flat (&g, section, m, seed);
 		  group_reset (&g);
 		  if (bad != 0)
 		    goto out;
@@ -1190,14 +1285,15 @@ mb_matrix_parse (const char *text, const char *section, mb_matrix_t *m)
 
 	  /* Start a new group when needed.  */
 	  int start_block = (k == K_LOOP || k == K_CASE);
-	  int start_flat = (k == K_SIZES && g.mode != G_FLAT);
+	  int start_flat = ((k == K_SIZES || k == K_DIST)
+			    && g.mode != G_FLAT);
 	  if (k == K_CASE)
 	    {
 	      if (g.mode != G_NONE)
 		{
 		  int bad = (g.mode == G_FLAT)
-		    ? expand_flat (&g, section, m)
-		    : expand_block (&g, section, m);
+		    ? expand_flat (&g, section, m, seed)
+		    : expand_block (&g, section, m, seed);
 		  group_reset (&g);
 		  if (bad != 0)
 		    goto out;
@@ -1213,8 +1309,8 @@ mb_matrix_parse (const char *text, const char *section, mb_matrix_t *m)
 	      if (g.mode != G_NONE)
 		{
 		  int bad = (g.mode == G_FLAT)
-		    ? expand_flat (&g, section, m)
-		    : expand_block (&g, section, m);
+		    ? expand_flat (&g, section, m, seed)
+		    : expand_block (&g, section, m, seed);
 		  group_reset (&g);
 		  if (bad != 0)
 		    goto out;
@@ -1222,7 +1318,10 @@ mb_matrix_parse (const char *text, const char *section, mb_matrix_t *m)
 	      g.mode = start_block ? G_BLOCK : G_FLAT;
 	      g.line_no = line_no;
 	      if (g.mode == G_FLAT)
-		g.both = 1;
+		{
+		  g.both = 1;
+		  g.dist_samples = 64;
+		}
 	      else
 		g.block_both = 1;
 	    }
@@ -1233,8 +1332,8 @@ mb_matrix_parse (const char *text, const char *section, mb_matrix_t *m)
 	  if (g.mode != G_NONE)
 	    {
 	      int bad = (g.mode == G_FLAT)
-		? expand_flat (&g, section, m)
-		: expand_block (&g, section, m);
+		? expand_flat (&g, section, m, seed)
+		: expand_block (&g, section, m, seed);
 	      group_reset (&g);
 	      if (bad != 0)
 		goto out;
@@ -1302,8 +1401,8 @@ mb_matrix_parse (const char *text, const char *section, mb_matrix_t *m)
     }
   if (g.mode != G_NONE)
     {
-      int bad = (g.mode == G_FLAT) ? expand_flat (&g, section, m)
-				   : expand_block (&g, section, m);
+      int bad = (g.mode == G_FLAT) ? expand_flat (&g, section, m, seed)
+				   : expand_block (&g, section, m, seed);
       if (bad != 0)
 	goto out;
     }
@@ -1320,7 +1419,8 @@ out:
 }
 
 int
-mb_matrix_load (const char *path, const char *section, mb_matrix_t *m)
+mb_matrix_load (const char *path, const char *section, uint64_t seed,
+		mb_matrix_t *m)
 {
   FILE *fp = fopen (path, "r");
   if (fp == NULL)
@@ -1369,7 +1469,7 @@ mb_matrix_load (const char *path, const char *section, mb_matrix_t *m)
       buf = nb;
     }
   buf[n] = '\0';
-  int rc = mb_matrix_parse (buf, section, m);
+  int rc = mb_matrix_parse (buf, section, seed, m);
   free (buf);
   return rc;
 }
@@ -1378,12 +1478,14 @@ void
 mb_matrix_init (mb_matrix_t *m)
 {
   memset (m, 0, sizeof *m);
+  mb_dist_init (&m->dist);
 }
 
 void
 mb_matrix_free (mb_matrix_t *m)
 {
   free (m->cases);
+  mb_dist_free (&m->dist);
   memset (m, 0, sizeof *m);
 }
 

@@ -95,6 +95,8 @@ tools/               (vendored from glibc benchtests/scripts)
 matrices/            matrix profiles: glibc_small.txt / glibc_large.txt (the
                      built-in defaults, compiled into the drivers) and
                      example.txt (all notation variants, flat + blocks)
+  distributions/     size distributions from real workloads (llvm-libc CSV),
+                     compiled into the drivers and selectable with --dist
 build/               build output (created by make)
 results/             run JSON files (created by mb)
 plots/               graphs (created by plot_mem.py)
@@ -193,6 +195,8 @@ tables defaults to `libc` (then the first implementation); change it with `-b/--
 | `--repeat N` | measure every test N times (each run is stored in the JSON) |
 | `--measure hot\|offsets\|mixed` | measurement mode (default `hot`, see below) |
 | `--batch N` | calls per randomized batch in `offsets`/`mixed` (default 1024) |
+| `--dist NAME\|FILE` | size distribution for `--measure mixed` (see `mb list`) |
+| `--list-dists` | print the embedded distribution names and exit |
 | `--iters-mode budget\|precision` | iteration policy (default `budget`) |
 | `--epsilon X` | precision target for `--iters-mode precision` (default 0.01) |
 | `--scaling X` | iteration growth factor in precision mode (default 1.4) |
@@ -279,14 +283,54 @@ measure the same functions with randomized parameters:
   per-size graphs.
 - Neither mode is directly comparable with `hot`/glibc numbers: they include the
   cost of unpredictable branches and misalignment on purpose.
+### Size distributions (`--dist`, llvm-libc's distribution mode)
+
+`--measure mixed` draws its sizes from the matrix's size pool by default; with
+`--dist` they come from an empirical distribution instead, which is how
+llvm-libc measures the average cost on a real workload:
+
+```sh
+./mb list                                                   # the names
+./mb run memcpy --measure mixed --dist memcpy_google_a --repeat 5
+./mb run memcpy --measure mixed --dist uniform_384_to_4096
+./mb run memcmp --measure mixed --dist ./my-sizes.csv       # your own CSV
+```
+
+The 37 distributions under `matrices/distributions/` come from llvm-libc (see
+their README for the license and provenance); every size is sampled per call
+with its empirical weight, so the reported GB/s is the average over the
+workload mix rather than over a uniform size range.  The name is matched
+ignoring case, spaces and underscores, so `memcpy_google_a`, `memcpy Google A`
+and `MemcpyGoogleA` are equivalent.
+
+Two CSV shapes are accepted, and weights are normalized (so counts work too):
+
+```
+0.0059,0.0661,0.0312,...        # one weight per column, size = index
+64,1200                         # size,weight per line (a header is allowed)
+128,340
+```
+
+In a matrix profile the distribution can also provide the sizes of the cases;
+`dist-samples` bounds how many distinct sizes are expanded:
+
+```
+[memcpy]
+dist = memcpy_google_a
+dist-samples = 32
+src = 0 3
+dst = 0
+```
+
 - `--iters-mode precision` (with `--epsilon`, `--scaling`, `--min-samples`,
   `--max-samples`, `--min-duration`, `--max-duration`) replaces the byte budget with
   llvm-libc's stopping rule: iterations grow geometrically until the running mean
   settles within `--epsilon`; the value is the cumulative mean.
 - `--mismatch-at N` (memcmp) moves the difference from the last byte of the range to
   byte `N-1`, which exercises early exit.
-- Diagnostics: `MB_DEBUG_BATCH=1` prints the first batch parameters,
-  `MB_DEBUG_PRECISION=1` prints the samples/calls used per precision measurement.
+- Diagnostics: `MB_DEBUG_BATCH=1` prints the first batch parameters and the
+  sampled mean size, `MB_DEBUG_PRECISION=1` prints the samples/calls used per
+  precision measurement, `MB_DEBUG_DIST=1` prints the parsed distribution size.
 
 ## Matrix profiles (`--matrix FILE`)
 
@@ -321,6 +365,9 @@ Syntax and semantics:
   sizes = 24576..98304:8192  # linear: 24576, 32768, ... 98304
   sizes = 131072             # single value
   ```
+- `dist = NAME` (or a CSV path) replaces `sizes`: the sizes come from an
+  empirical distribution, `dist-samples = N` bounds how many distinct sizes
+  are expanded into cases (default 64).  See the distributions section above.
 - Keys per function:
   - `memcpy`, `memcmp`: `sizes`, `src`, `dst`, `both`;
   - `memmove`: same keys — all offsets live in one buffer, so pairs overlap; when the
@@ -518,22 +565,29 @@ checks on an x86 host.
 
 ## License & provenance
 
-The original code of this project (everything under `src/`, `cli/`, `tools/plot_mem.py`,
-the `impls/` examples, `Makefile`, `matrices/`, `mb`) is released under the
-**MIT License** — see [LICENSE](LICENSE).
+The original code of this project (everything under `src/`, `cli/`,
+`tools/plot_mem.py`, the `impls/` examples, `Makefile`, `mb`, and `matrices/`
+except the distributions directory) is released under the **MIT License** - see
+[LICENSE](LICENSE).
 
-Several files were **vendored from the GNU C Library benchtests** and remain under the
-GNU Lesser General Public License, version 2.1 or later (as stated in their headers):
+**Vendored from the GNU C Library** (benchtests), under the GNU Lesser General
+Public License, version 2.1 or later (as stated in their headers):
 
-- `src/json-lib.c`, `src/json-lib.h` — JSON writer;
+- `src/json-lib.c`, `src/json-lib.h` - JSON writer;
 - `tools/compare_strings.py`, `tools/plot_strings.py`, `tools/benchout.schema.json`,
-  `tools/benchout_strings.schema.json` — analysis scripts and schemas.
+  `tools/benchout_strings.schema.json` - analysis scripts and schemas.
 
 Those files carry their original copyright headers
-(`Copyright (C) <year>-2026 Free Software Foundation, Inc.`). The benchmark
-methodology (guard pages, alignment/size matrices, timing technique) is adapted from
-the glibc benchtests; the implementations of that methodology in this repository are
-original.
+(`Copyright (C) <year>-2026 Free Software Foundation, Inc.`).  The benchmark
+methodology (guard pages, alignment/size matrices, timing technique) is adapted
+from the glibc benchtests; the implementations of that methodology in this
+repository are original.
+
+**Vendored from the LLVM project** (libc benchmarks), under the Apache License
+v2.0 with LLVM Exceptions:
+
+- `matrices/distributions/*.csv` - the memory function size distributions
+  observed in production (see `matrices/distributions/README.md`).
 
 ## Dependencies
 

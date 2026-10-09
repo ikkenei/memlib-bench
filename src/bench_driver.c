@@ -112,23 +112,6 @@ typedef struct
 
 static uint64_t rng_state;
 
-static uint64_t
-rng_next (void)
-{
-  uint64_t x = rng_state;
-  x ^= x << 13;
-  x ^= x >> 7;
-  x ^= x << 17;
-  rng_state = x;
-  return x;
-}
-
-static uint64_t
-rng_below (uint64_t n)
-{
-  return n > 0 ? rng_next () % n : 0;
-}
-
 static void
 batch_free (mb_batch_t *b)
 {
@@ -137,13 +120,30 @@ batch_free (mb_batch_t *b)
   b->n = 0;
 }
 
-/* Build a batch of COUNT prepared calls.  Sizes are drawn uniformly from
-   SIZES (all equal for the "offsets" mode) and the offsets are randomly
-   placed within the page.  C provides the function-specific parameters
-   (fill byte, expected result).  */
+/* Where the sizes of a randomized batch come from: a plain list (uniform
+   sampling) or an empirical distribution (weighted sampling).  */
+typedef struct
+{
+  const size_t *sizes;
+  size_t nsizes;
+  const mb_dist_t *dist;
+} mb_sizes_t;
+
+static size_t
+sizes_sample (const mb_sizes_t *pool)
+{
+  if (pool->dist != NULL)
+    return mb_dist_sample (pool->dist, &rng_state);
+  return pool->sizes[mb_rng_below (&rng_state, pool->nsizes)];
+}
+
+/* Build a batch of COUNT prepared calls.  Sizes are drawn from POOL (all
+   equal for the "offsets" mode) and the offsets are randomly placed
+   within the page.  C provides the function-specific parameters (fill
+   byte, expected result).  */
 static int
-batch_build (const mb_func_t *f, const mb_case_t *c, const size_t *sizes,
-	     size_t nsizes, size_t count, mb_batch_t *b)
+batch_build (const mb_func_t *f, const mb_case_t *c, const mb_sizes_t *pool,
+	     size_t count, mb_batch_t *b)
 {
   unsigned long mask = mb_real_page > 0 ? (unsigned long) (mb_real_page - 1)
 					: 4095ul;
@@ -156,7 +156,7 @@ batch_build (const mb_func_t *f, const mb_case_t *c, const size_t *sizes,
 
   for (size_t i = 0; i < count; i++)
     {
-      size_t len = sizes[rng_below (nsizes)];
+      size_t len = sizes_sample (pool);
       int ok = 0;
 
       for (int tries = 0; tries < 16 && !ok; tries++)
@@ -177,16 +177,16 @@ batch_build (const mb_func_t *f, const mb_case_t *c, const size_t *sizes,
 		}
 	      else
 		{
-		  long long base = lo + (long long) rng_below ((uint64_t)
-							       (hi - lo + 1));
+		  long long base = lo + (long long) mb_rng_below (&rng_state,
+								    (uint64_t) (hi - lo + 1));
 		  t.a1 = base;
 		  t.a2 = base + delta;
 		}
 	    }
 	  else
 	    {
-	      t.a1 = (long) rng_below (mask + 1);
-	      t.a2 = (long) rng_below (mask + 1);
+	      t.a1 = (long) mb_rng_below (&rng_state, mask + 1);
+	      t.a2 = (long) mb_rng_below (&rng_state, mask + 1);
 	    }
 	  ok = f->prepare (&t, 0, &b->p[i]) > 0;
 	}
@@ -204,10 +204,14 @@ batch_build (const mb_func_t *f, const mb_case_t *c, const size_t *sizes,
     }
 
   if (getenv ("MB_DEBUG_BATCH") != NULL)
-    fprintf (stderr, "[memlib] batch: n=%zu first=(len=%zu, off=%.0f/%.0f)\n",
-	     b->n, c->len,
-	     (double) (size_t) (char *) b->p[0].dst - (double) (size_t) (char *) b->p[0].src,
-	     (double) b->p[0].len);
+    {
+      double sum = 0.0;
+      for (size_t i = 0; i < b->n; i++)
+	sum += (double) b->p[i].len;
+      fprintf (stderr, "[memlib] batch: n=%zu mean_len=%.1f first=(len=%zu, "
+	       "a1=%lu, a2=%lu)\n", b->n, sum / (double) b->n,
+	       b->p[0].len, b->p[0].a1, b->p[0].a2);
+    }
   return 0;
 }
 
@@ -385,12 +389,14 @@ measure_impl (const mb_func_t *f, const mb_impl_t *impl,
 static void
 emit_batch (json_ctx_t *ctx, const mb_func_t *f, const mb_case_t *c,
 	    const mb_batch_t *b, size_t length, const char *sizes,
-	    long run, size_t iters)
+	    const char *dist_name, long run, size_t iters)
 {
   json_element_object_begin (ctx);
   json_attr_uint (ctx, "length", length);
   json_attr_string (ctx, "offsets", "random");
   json_attr_uint (ctx, "batch", b->n);
+  if (dist_name != NULL)
+    json_attr_string (ctx, "dist", dist_name);
   if (sizes != NULL)
     json_attr_string (ctx, "sizes", sizes);
   if (f->attrs_batch != NULL)
@@ -424,12 +430,13 @@ run_offsets_mode (json_ctx_t *ctx, const mb_matrix_t *m, const mb_func_t *f,
       for (size_t r = 0; r < reps; r++)
 	{
 	  size_t sizes[1] = { c->len };
+	  mb_sizes_t pool = { sizes, 1, NULL };
 	  mb_batch_t b;
-	  if (batch_build (f, c, sizes, 1, count, &b) != 0)
+	  if (batch_build (f, c, &pool, count, &b) != 0)
 	    continue;
 	  for (int i = 0; i < mb_impl_count (); i++)
 	    warm_batch (f, mb_impl_get (i), &b, iters);
-	  emit_batch (ctx, f, c, &b, c->len, NULL,
+	  emit_batch (ctx, f, c, &b, c->len, NULL, NULL,
 		      reps > 1 ? (long) r : -1, iters);
 	  batch_free (&b);
 	}
@@ -446,10 +453,79 @@ struct mixed_group
   size_t n, cap;
 };
 
-/* Randomized sizes (pooled from the matrix) and offsets.  The matrix
-   cases are grouped by the function-specific parameters (fill byte,
-   expected result); each group produces one result per repetition, and
-   every repetition gets a fresh randomized batch.  */
+/* Keep the sizes of IN that the representative case can actually run
+   (buffer bounds, --max-len), renormalizing the weights.  Returns 0 when
+   at least one size survives.  */
+static int
+filter_dist (const mb_dist_t *in, const mb_func_t *f, const mb_case_t *rep,
+	     mb_dist_t *out)
+{
+  mb_dist_init (out);
+  size_t cap = in->n ? in->n : 1;
+  out->sizes = malloc (cap * sizeof *out->sizes);
+  out->cum = malloc (cap * sizeof *out->cum);
+  if (out->sizes == NULL || out->cum == NULL)
+    {
+      mb_dist_free (out);
+      return -1;
+    }
+
+  double total = 0.0, prev = 0.0;
+  for (size_t i = 0; i < in->n; i++)
+    {
+      double w = in->cum[i] - prev;
+      prev = in->cum[i];
+      if (w <= 0.0)
+	continue;
+      mb_case_t c = *rep;
+      c.len = in->sizes[i];
+      c.both = 0;
+      mb_pointers_t p;
+      if (f->prepare (&c, 0, &p) <= 0)
+	continue;
+      out->sizes[out->n] = in->sizes[i];
+      out->cum[out->n] = w;
+      out->n++;
+      total += w;
+    }
+  if (out->n == 0)
+    {
+      mb_dist_free (out);
+      return -1;
+    }
+
+  double acc = 0.0;
+  for (size_t i = 0; i < out->n; i++)
+    {
+      acc += out->cum[i] / total;
+      out->cum[i] = acc;
+    }
+  out->cum[out->n - 1] = 1.0;
+  snprintf (out->name, sizeof out->name, "%s", in->name);
+  return 0;
+}
+
+/* Weighted mean, minimum and maximum of a distribution.  */
+static void
+dist_stats (const mb_dist_t *d, size_t *mean, size_t *lo, size_t *hi)
+{
+  *lo = d->sizes[0];
+  *hi = d->sizes[d->n - 1];
+  double acc = 0.0, prev = 0.0;
+  for (size_t i = 0; i < d->n; i++)
+    {
+      double w = d->cum[i] - prev;
+      prev = d->cum[i];
+      acc += w * (double) d->sizes[i];
+    }
+  *mean = (size_t) (acc + 0.5);
+}
+
+/* Randomized sizes and offsets.  The matrix cases provide the
+   function-specific parameters (fill byte, expected result); the sizes
+   come from the matrix distribution when there is one, otherwise they
+   are drawn uniformly from the sizes of the cases.  One result per group
+   and repetition, each repetition with a fresh batch.  */
 static void
 run_mixed_mode (json_ctx_t *ctx, const mb_matrix_t *m, const mb_func_t *f,
 		size_t reps)
@@ -523,20 +599,45 @@ run_mixed_mode (json_ctx_t *ctx, const mb_matrix_t *m, const mb_func_t *f,
   for (size_t j = 0; j < ngroups; j++)
     {
       struct mixed_group *g = &groups[j];
-      if (g->n == 0)
-	continue;
+      mb_sizes_t pool;
+      mb_dist_t filtered;
+      int have_dist = 0;
+      size_t mean, minlen, maxlen;
 
-      size_t minlen = g->pool[0], maxlen = g->pool[0];
-      double sum = 0.0;
-      for (size_t i = 0; i < g->n; i++)
+      if (m->dist.n > 0)
 	{
-	  if (g->pool[i] < minlen)
-	    minlen = g->pool[i];
-	  if (g->pool[i] > maxlen)
-	    maxlen = g->pool[i];
-	  sum += (double) g->pool[i];
+	  if (filter_dist (&m->dist, f, &g->rep, &filtered) != 0)
+	    {
+	      fprintf (stderr, "warning: no '%s' size fits the buffers for "
+		       "one parameter group; it is skipped\n", m->dist.name);
+	      continue;
+	    }
+	  have_dist = 1;
+	  pool.sizes = NULL;
+	  pool.nsizes = 0;
+	  pool.dist = &filtered;
+	  dist_stats (&filtered, &mean, &minlen, &maxlen);
 	}
-      size_t mean = (size_t) (sum / (double) g->n + 0.5);
+      else
+	{
+	  if (g->n == 0)
+	    continue;
+	  pool.sizes = g->pool;
+	  pool.nsizes = g->n;
+	  pool.dist = NULL;
+	  minlen = maxlen = g->pool[0];
+	  double sum = 0.0;
+	  for (size_t i = 0; i < g->n; i++)
+	    {
+	      if (g->pool[i] < minlen)
+		minlen = g->pool[i];
+	      if (g->pool[i] > maxlen)
+		maxlen = g->pool[i];
+	      sum += (double) g->pool[i];
+	    }
+	  mean = (size_t) (sum / (double) g->n + 0.5);
+	}
+
       char sizes_str[64];
       snprintf (sizes_str, sizeof sizes_str, "%zu..%zu", minlen, maxlen);
       size_t iters = mb_pick_iters (mb_opts, mean == 0 ? 1 : mean);
@@ -544,14 +645,17 @@ run_mixed_mode (json_ctx_t *ctx, const mb_matrix_t *m, const mb_func_t *f,
       for (size_t r = 0; r < reps; r++)
 	{
 	  mb_batch_t b;
-	  if (batch_build (f, &g->rep, g->pool, g->n, count, &b) != 0)
+	  if (batch_build (f, &g->rep, &pool, count, &b) != 0)
 	    break;
 	  for (int i = 0; i < mb_impl_count (); i++)
 	    warm_batch (f, mb_impl_get (i), &b, iters);
 	  emit_batch (ctx, f, &g->rep, &b, mean, sizes_str,
+		      have_dist ? m->dist.name : NULL,
 		      reps > 1 ? (long) r : -1, iters);
 	  batch_free (&b);
 	}
+      if (have_dist)
+	mb_dist_free (&filtered);
     }
 
   for (size_t j = 0; j < ngroups; j++)
@@ -667,6 +771,14 @@ mb_driver_main (const mb_func_t *func, int argc, char **argv)
   mb_install_crash_reporter ();
   mb_opts_parse (&o, argc, argv, func->name, NULL);
 
+  if (o.list_dists)
+    {
+      const char *const *names = mb_dist_names ();
+      for (size_t i = 0; names[i] != NULL; i++)
+	puts (names[i]);
+      return 0;
+    }
+
   if (mb_register_impls (&o, func->name, func->generic_ref) < 0)
     return 1;
 
@@ -682,8 +794,9 @@ mb_driver_main (const mb_func_t *func, int argc, char **argv)
   if (!o.check)
     {
       int rc = (o.matrix != NULL)
-	? mb_matrix_load (o.matrix, func->name, &mx)
-	: mb_matrix_load_default (func->name, o.max_len > (1u << 17), &mx);
+	? mb_matrix_load (o.matrix, func->name, o.seed, &mx)
+	: mb_matrix_load_default (func->name, o.max_len > (1u << 17),
+				  o.seed, &mx);
       if (rc != 0)
 	{
 	  fprintf (stderr, "error: %s\n", mb_matrix_err ());
@@ -691,10 +804,30 @@ mb_driver_main (const mb_func_t *func, int argc, char **argv)
 	}
     }
 
+  /* An explicit --dist overrides the profile's distribution; it only
+     makes sense for the randomized measurement mode.  */
+  if (!o.check && o.dist != NULL)
+    {
+      if (o.measure != MB_MEASURE_MIXED)
+	{
+	  fprintf (stderr, "error: --dist requires --measure mixed (or a "
+		   "profile with 'dist = NAME')\n");
+	  return 1;
+	}
+      mb_dist_free (&mx.dist);
+      if (mb_dist_load (o.dist, &mx.dist) != 0)
+	{
+	  fprintf (stderr, "error: %s\n", mb_dist_err ());
+	  return 1;
+	}
+    }
+
   size_t want = o.max_len != 0 ? o.max_len : (MB_MIN_PAGE_SIZE - 1);
-  if (!o.check && o.matrix != NULL
-      && (size_t) mb_matrix_max_len (&mx) > want)
-    want = (size_t) mb_matrix_max_len (&mx);
+  long long mmax = mb_matrix_max_len (&mx);
+  if (mx.dist.n > 0 && (long long) mb_dist_max (&mx.dist) > mmax)
+    mmax = (long long) mb_dist_max (&mx.dist);
+  if (!o.check && (o.matrix != NULL || mx.dist.n > 0) && (size_t) mmax > want)
+    want = (size_t) mmax;
   if (mb_buffers_init (MB_MIN_PAGE_SIZE, want) == 0)
     {
       fprintf (stderr, "error: cannot allocate benchmark buffers\n");

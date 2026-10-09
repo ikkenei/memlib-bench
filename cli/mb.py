@@ -194,6 +194,7 @@ def driver_cmd(fn, args, impls, check):
                       ("--min-iters", "min_iters"),
                       ("--repeat", "repeat"),
                       ("--measure", "measure"), ("--batch", "batch"),
+                      ("--dist", "dist"),
                       ("--iters-mode", "iters_mode"),
                       ("--epsilon", "epsilon"), ("--scaling", "scaling"),
                       ("--initial-iters", "initial_iters"),
@@ -805,6 +806,18 @@ def do_check(args):
     return 1 if failed else 0
 
 
+def distribution_names():
+    """Embedded distribution names, from a built driver."""
+    for fn in FUNCS:
+        if os.path.exists(DRIVER[fn]):
+            p = subprocess.run([DRIVER[fn], "--list-dists"],
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL)
+            if p.returncode == 0:
+                return p.stdout.decode().split()
+    return None
+
+
 def do_list(args):
     print("Benchmark drivers (build/):")
     for fn in FUNCS:
@@ -816,7 +829,17 @@ def do_list(args):
         so = os.path.join(IMPLDIR, stem + ".so")
         print("  %-28s .so: %s" % (p, "built" if os.path.exists(so)
                                    else "not built"))
-    print("\nUse:  mb run <func...> [--impl <name|path> ...]")
+    names = distribution_names()
+    print("\nSize distributions (--dist; the name is matched ignoring case, "
+          "spaces and underscores):")
+    if names is None:
+        print("  (benchmark drivers not built)")
+    else:
+        for n in names:
+            print("  %s" % n)
+
+    print("\nUse:  mb run <func...> [--impl <name|path> ...] "
+          "[--measure mixed --dist <name>]")
 
 
 def do_build(args):
@@ -952,6 +975,10 @@ def build_parser():
     r.add_argument("--batch", type=int, default=None,
                    help="calls per randomized batch in --measure "
                         "offsets/mixed (default 1024)")
+    r.add_argument("--dist", default=None, metavar="NAME|FILE",
+                   help="size distribution for --measure mixed: an "
+                        "embedded CSV name (see `mb list`) or a file "
+                        "with 'size,weight' pairs / one weight per line")
     r.add_argument("--iters-mode", choices=["budget", "precision"],
                    default=None,
                    help="iteration policy: budget (default) or precision "
