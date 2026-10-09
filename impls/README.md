@@ -8,3 +8,7 @@ Examples in this directory: `example_c.c` (portable C), `example_neon.S`
 (aarch64 NEON), `example_sse2.S` (x86-64 SSE2). The assembly examples are built
 only when the toolchain targets their architecture. See the main README
 ("Your implementations") for details.
+
+A library only needs the functions it actually implements: when it does not
+define one, that function is skipped with a warning (`example_sse2.so` only
+defines `memcpy`, for instance).

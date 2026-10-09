@@ -154,8 +154,11 @@ picks it up by name:
 
 Rules:
 
-- An implementation does not have to provide all four functions — missing symbols are
-  skipped with a warning for the affected function.
+- An implementation does not have to provide all four functions — a symbol the
+  library does not define itself is skipped with a warning for the affected
+  function.  (The check matters because `dlsym()` on a library handle would
+  otherwise find libc's implementation through the library's dependencies and
+  report it under the label of the library.)
 - Symbols must have the standard signatures and default visibility
   (`memcpy`, `memmove`, `memset`, `memcmp`).
 - Libraries are loaded with `dlopen(RTLD_LOCAL)`, so they cannot interpose on the

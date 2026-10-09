@@ -4,10 +4,13 @@
    only depends on POSIX (mmap, dlfcn) and libc.
  */
 
+#define _GNU_SOURCE 1		/* dladdr, Dl_info */
+
 #include "bench_common.h"
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -94,6 +97,25 @@ mb_impl_add_dlopen (const char *path, const char *symbol,
       snprintf (errbuf, sizeof errbuf,
 		"dlsym(%s, \"%s\"): %s", path, symbol, e);
       return -1;
+    }
+  /* dlsym() on a library handle also searches the dependencies of that
+     library, so a shared object that does not implement the symbol at all
+     would silently report libc's implementation under its own label.
+     Require the symbol to be defined by the object we opened.  */
+  Dl_info info;
+  if (dladdr (fn, &info) != 0 && info.dli_fname != NULL)
+    {
+      char want[PATH_MAX], got[PATH_MAX];
+      const char *w = realpath (path, want);
+      const char *g = realpath (info.dli_fname, got);
+      if (w != NULL && g != NULL && strcmp (w, g) != 0)
+	{
+	  snprintf (errbuf, sizeof errbuf,
+		    "%s does not define \"%s\" (it resolves to %s)",
+		    path, symbol, info.dli_fname);
+	  dlclose (h);
+	  return -1;
+	}
     }
   return mb_impl_add (label, (mb_fn_t) fn, MB_KIND_CUSTOM);
 }
