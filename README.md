@@ -431,8 +431,12 @@ profiles cannot express:
 
 Each reported row carries `offsets="profile"`, `profile=<name>`,
 `mode=<class>[@attr]` and `sizes="min..max"`, so the results say which pattern
-was measured.  A profile can also be reduced to a plain size histogram by
-`convert --sizes-csv sizes.csv`, which `--dist` accepts.
+was measured.  A capture usually contains only the functions the traced program
+actually called, and asking for a function that is missing is an error
+(`no 'memcpy' rows found`) rather than an empty result - so run `--profile` only
+for the functions the capture has (the tracer probes all four by default).
+A profile can also be reduced to a plain size histogram by `convert
+--sizes-csv sizes.csv`, which `--dist` accepts.
 
 Limitations: in the batch modes `memcmp` uses one alignment for both pointers, so
 its `src_align`/`dst_align` are ignored; a `differs` group's mismatch byte is
