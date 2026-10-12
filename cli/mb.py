@@ -909,7 +909,9 @@ def common_driver_options(p):
                    help="skip the frequency ramp-up loop")
     p.add_argument("-m", "--matrix", default=None,
                    help="matrix profile file for sizes/offsets "
-                        "(see matrices/example.txt); ignored by mb check")
+                        "(see matrices/example.txt; your own go to "
+                        "matrices/custom/, which is git-ignored); "
+                        "ignored by mb check")
     p.add_argument("--no-build", action="store_true", dest="no_build",
                    help="do not rebuild drivers/implementations "
                         "automatically when they are out of date")

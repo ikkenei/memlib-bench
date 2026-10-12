@@ -4,3 +4,9 @@ plots/
 *.o
 *.so
 __pycache__/
+
+# Your own loads (matrix profiles, size distributions, memtrace captures).
+# Everything here except the README is ignored, so `git pull` never touches
+# the files you put in matrices/custom/.
+matrices/custom/*
+!matrices/custom/README.md

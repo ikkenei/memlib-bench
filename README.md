@@ -107,6 +107,8 @@ matrices/            matrix profiles: glibc_small.txt / glibc_large.txt (the
                      example.txt (all notation variants, flat + blocks)
   distributions/     size distributions from real workloads (llvm-libc CSV),
                      compiled into the drivers and selectable with --dist
+  custom/            your own matrix profiles, distributions and captures;
+                     git-ignored except this README (see custom/README.md)
 build/               build output (created by make)
 results/             run JSON files (created by mb)
 plots/               graphs (created by plot_mem.py)
@@ -453,6 +455,10 @@ file containing one section per function:
 ./mb run memcpy memmove --matrix matrices/example.txt
 ```
 
+Put your own profiles in `matrices/custom/`: everything there except its README
+is ignored by git, so `git pull` never touches them (see
+[`matrices/custom/README.md`](matrices/custom/README.md)).
+
 Format (full example: `matrices/example.txt`):
 
 ```
@@ -538,6 +544,11 @@ a file and running `make` (or just `./mb run ...`, which rebuilds automatically)
 applies the change; `./mb run --matrix matrices/glibc_small.txt ...` runs the same
 matrix from the file without rebuilding.  The alignment mask applied by `do_test`
 (`& (page-1)` for the copy functions, `& 4095` for `memset`/`memcmp`) is unchanged.
+
+Your own files belong in `matrices/custom/` (git-ignored, see
+[`matrices/custom/README.md`](matrices/custom/README.md)) - they are passed with
+`--matrix` / `--dist` / `--profile` like any other file and are never rebuilt into
+the drivers.
 
 ## Adding a benchmarked function
 
